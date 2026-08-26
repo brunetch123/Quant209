@@ -1,0 +1,66 @@
+# -- Laboratory data ------------------------------------------------------
+# Instrument data never belongs in this repository. These rules match on what an acquisition
+# folder actually contains rather than on run-folder names, so a run folder is ignored no
+# matter what the laboratory calls it.
+*.D/
+*.D_OLD/
+*.d/
+**/Converted/
+runstart.txt
+acq.macaml
+sample_info.xml
+*.mzML
+*.sequence.xml
+*.sequence-*.xml
+*msinsctl*.txt
+# Analyst workbooks
+*.xls
+*.doc
+*.docx
+*.xlsx
+*.xlsm
+~$*
+# Reference material and vendor binaries kept beside the data
+Background/
+MSconvert/
+
+# -- Generated data and reports -------------------------------------------
+*.csv
+*.tsv
+*.pdf
+*.log
+output/
+results/
+# Pooled archive comparison; regenerate with tools/master_bench.py
+docs/validation/master*/
+
+# -- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.venv*/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# -- Build output ---------------------------------------------------------
+packaging/release/
+
+# -- Committed on purpose -------------------------------------------------
+# The blanket rules above would otherwise take these with them.
+!quant209/config/*.csv
+!tests/fixtures/*.csv
+!docs/images/*.png
+
+# -- Local only -----------------------------------------------------------
+# Binding to a local instrument-data archive; holds real sample names.
+tests/dataset.json
+# Copies of .git kept on this machine; not part of the project.
+.git-BACKUP-*/
+.git-DESTROYED-*/

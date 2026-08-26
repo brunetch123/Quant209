@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant209"
+version = "1.0.0"
+description = "Quantify all 209 PCB congeners from Agilent triple-quadrupole GC-MS/MS data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "numpy",
+    "pandas",
+    "openpyxl",
+]
+
+[project.optional-dependencies]
+app = ["PySide6-Essentials", "pyqtgraph"]
+report = ["matplotlib"]
+dev = ["pytest", "pytest-qt"]
+
+[project.scripts]
+quant209 = "quant209.cli:main"
+
+[project.gui-scripts]
+quant209-gui = "quant209.app.main:main"
+
+[tool.setuptools.packages.find]
+include = ["quant209*"]
+
+[tool.setuptools.package-data]
+quant209 = ["config/*.csv", "app/assets/*.svg", "py.typed"]

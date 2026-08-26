@@ -1,0 +1,18 @@
+{
+  "_comment": "Copy to dataset.json and replace with the names used in your own archive. Every value is a folder, workbook or sample name as it appears on disk; nothing here is read for its content, only to locate things.",
+
+  "run": "REFERENCE_RUN_FOLDER",
+  "alt_run": "RUN_FOLDER_ACQUIRED_UNDER_A_DIFFERENT_GC_METHOD",
+
+  "workbook": "ANALYST_WORKBOOK_COVERING_THE_FIRST_SAMPLES",
+  "workbook_2": "ANALYST_WORKBOOK_COVERING_THE_NEXT_SAMPLES",
+  "workbook_3": "ANALYST_WORKBOOK_COVERING_THE_LAST_SAMPLES",
+  "workbook_superseded": "A_WORKBOOK_REISSUED_LATER_WITH_AN_EMPTY_CAL_SHEET",
+
+  "sample": "A_SAMPLE_IN_workbook_BRACKETED_TO_THE_FIRST_REFERENCE",
+  "sample_2": "ANOTHER_SAMPLE_IN_workbook",
+  "sample_in_workbook_2": "A_SAMPLE_IN_workbook_2",
+  "sample_in_workbook_3": "A_SAMPLE_IN_workbook_3_BRACKETED_TO_THE_THIRD_REFERENCE",
+  "sample_second_batch": "A_SAMPLE_BRACKETED_TO_THE_SECOND_REFERENCE",
+  "blank_late": "A_BLANK_ACQUIRED_AFTER_THE_FIRST_REFERENCE"
+}
