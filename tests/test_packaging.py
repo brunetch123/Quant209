@@ -62,8 +62,17 @@ def test_every_workflow_page_module_is_declared(spec_text: str) -> None:
 
 
 def test_packaged_data_files_are_declared(spec_text: str) -> None:
-    """The canonical peak table is read through importlib.resources, never imported."""
-    assert "canonical_peaks.csv" in spec_text
+    """Every packaged table is read through importlib.resources, never imported, so the
+    frozen build only carries the ones the spec names. A table left out works from source
+    and fails in the installed application."""
+    from importlib import resources
+
+    tables = sorted(
+        p.name for p in resources.files("quant209.config").iterdir() if p.name.endswith(".csv")
+    )
+    assert tables == ["aroclor_abundance.csv", "canonical_peaks.csv"]
+    for table in tables:
+        assert table in spec_text, f"{table} is packaged but not declared in the spec"
     assert "assets" in spec_text
 
 

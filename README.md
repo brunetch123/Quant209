@@ -37,7 +37,7 @@ method. Any reported value can be traced back to the chromatogram it came from.
 Download `Quant209-<version>-windows.zip` from the
 [Releases page](https://github.com/brunetch123/Quant209/releases), extract it, and
 double-click **Install Quant 209.vbs**. Shortcuts are placed on the Desktop and in the Start
-Menu.
+Menu. What changed in each version is listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 The installer does not require administrator rights or a Python installation. It writes to
 `%LOCALAPPDATA%\Programs\Quant209` within the current user profile. **Uninstall Quant
@@ -138,8 +138,8 @@ fifteen that are not scored.
 
 | | median relative difference | within ±25% |
 |---|---|---|
-| Peak areas | 2.1% | 87.1% |
-| Congener masses | 4.6% | 78.7% |
+| Peak areas | 2.0% | 88.8% |
+| Congener masses | 4.2% | 84.1% |
 | Surrogate recoveries | 0.030 mean absolute error | |
 
 No run in the archive disagrees by more than 7.4% at the median. Agreement is best on large,
@@ -148,7 +148,14 @@ limit, where manual integration is also imprecise and results are censored.
 
 [`docs/validation/`](docs/validation/) holds the full comparison.
 [`docs/METHODS.md`](docs/METHODS.md) describes every rule the pipeline applies and states its
-known limitations.
+known limitations. Four congeners are integrated by named rules where the trace alone does not
+find them, and each such peak carries the `forced` flag (METHODS section 2.7). In a
+concentrated sample, a dominant peak that drifts into a minor neighbour's retention-time
+window is given back to it on the strength of published Aroclor profiles, and carries the
+`displaced` flag. Two comparable congeners merged into one envelope are split by a two-peak
+fit and carry the `apportioned` flag (section 2.8). A file whose labelled standards show part
+of its chromatogram moved is searched where they went, flagged `realigned` (section 3.3). A
+file without a usable internal standard gets an error and no mass (section 4.2).
 
 ## Layout
 
@@ -168,7 +175,7 @@ quant209/
   report/      Excel workbook, comparison report, workbook reader
   app/         the desktop application
   cli.py       command line
-tools/         batch conversion, benchmarking, measurement
+tools/         batch conversion, benchmarking, measurement, validation figures
 packaging/     installer and build scripts
 ```
 
@@ -181,7 +188,7 @@ be tested without a display.
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-The suite contains 413 tests. Tests that require instrument data skip when it is absent, so a
+The suite contains 462 tests. Tests that require instrument data skip when it is absent, so a
 fresh clone passes without an archive. Coverage includes the numerical primitives against
 analytic values, the calculation chain against hand-computed figures, the desktop application
 offscreen, and the packaging configuration.
@@ -191,7 +198,10 @@ To re-run the archive comparison:
 ```
 .venv\Scripts\python.exe tools\master_bench.py --out docs\validation\master
 .venv\Scripts\python.exe tools\master_report.py --data docs\validation\master
+.venv\Scripts\python.exe tools\validation_figures.py --data docs\validation\master
 ```
+
+The outputs of all three name the laboratory's runs and samples, so none of them is committed.
 
 ## Licence
 

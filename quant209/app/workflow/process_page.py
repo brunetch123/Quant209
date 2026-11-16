@@ -9,7 +9,7 @@ page reports three things at once, and none of them is a spinner:
 
 * **An overall bar**, weighted across the pipeline's three phases rather than restarting at
   zero for each one. A bar that reaches 100% twice is a bar nobody trusts again.
-* **A phase line** in the pipeline's own vocabulary (``[integrate] 7/22 LM_BRT16``), so the
+* **A phase line** in the pipeline's own vocabulary (``[integrate] 7/22 AN_DEMO03``), so the
   number moving is a file the analyst can name.
 * **A log** that keeps every line, because "which file was it on when it slowed down" is a
   question asked afterwards, and a label that only ever shows the current value cannot
@@ -91,7 +91,7 @@ MAX_LOG_LINES = 2000
 
 
 def _format_progress(phase: str, index: int, total: int, label: str) -> str:
-    """The pipeline's own callback (``[integrate] 7/22 LM_BRT16``), rendered for a human.
+    """The pipeline's own callback (``[integrate] 7/22 AN_DEMO03``), rendered for a human.
 
     ``index`` arrives 0-based (``core.pipeline``'s contract) and is shown 1-based, because
     "0/22" next to a file that is currently being read is simply wrong to a reader.

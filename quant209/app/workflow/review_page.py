@@ -180,28 +180,35 @@ VALUE_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 #: ``index.data(OUT_OF_BAND_ROLE)`` -> ``True`` for a recovery outside the acceptance band.
 OUT_OF_BAND_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 
-#: Chip tone per flag kind. Amber for anything that weakens a number, blue for the two that
-#: only describe how it was measured, grey for a censoring decision that worked as designed.
+#: Chip tone per flag kind. Amber for anything that weakens a number, blue for the three
+#: that only describe how it was measured, grey for a censoring decision that worked as
+#: designed.
 FLAG_TONES: dict[str, str] = {
     "absent": "neutral",
     "low_sn": "warning",
     "narrow": "warning",
     "clustered": "info",
     "shoulder": "info",
+    "forced": "info",
+    "displaced": "info",
+    "apportioned": "info",
+    "realigned": "info",
     "censored": "neutral",
     "recovery": "error",
+    "missing_is": "error",
 }
 
 #: The QA/QC tab's filter chips, in order. ``All`` is not a kind. It clears the others.
 FLAG_KINDS: tuple[str, ...] = (
-    "recovery", "absent", "low_sn", "narrow", "clustered", "shoulder", "censored",
+    "recovery", "missing_is", "absent", "low_sn", "narrow", "clustered", "shoulder", "forced", "displaced",
+    "apportioned", "realigned", "censored",
 )
 
 #: How a flag kind is *written* on screen. The stored kind is unchanged: it is what the CSV
 #: export writes and what every filter compares. But ``low_sn`` is an identifier, not a word,
 #: and a screen that shows an analyst the engine's variable names is a screen that was never
 #: read by one. Anything absent from this map falls back to its own kind.
-FLAG_LABELS: dict[str, str] = {"low_sn": "low S/N"}
+FLAG_LABELS: dict[str, str] = {"low_sn": "low S/N", "missing_is": "missing IS"}
 
 #: The same rule for ``core.integrate.KNOWN_METHODS``, the peak table's "Method" column.
 METHOD_LABELS: dict[str, str] = {
@@ -276,6 +283,35 @@ def _within_band(fraction: float) -> float:
     return min(max(fraction, 0.0), 1.0) * 99.0
 
 
+#: Why a file has no usable internal standard, as the analyst reads it. Keys are the reasons in
+#: ``core.pipeline.MISSING_IS_FLAG``.
+MISSING_IS_REASONS: dict[str, str] = {
+    "absent": "not in this injection",
+    "not_found": "not found at its expected retention time",
+    "rejected": "integrated, but inconsistent with the rest of the run",
+}
+
+
+def missing_standards(result) -> dict[str, dict[str, str]]:
+    """File id -> {internal-standard label: reason} from the run's sample-level flags."""
+    out: dict[str, dict[str, str]] = {}
+    prefix = "missing_internal_standard:"
+    for file_id, flags in (getattr(result, "flags", None) or {}).items():
+        for flag in flags or ():
+            if flag.startswith(prefix):
+                label, _, why = flag[len(prefix):].partition("=")
+                out.setdefault(str(file_id), {})[label] = why or "absent"
+    return out
+
+
+def missing_standard_text(missing: dict[str, str], whole_file: bool) -> str:
+    """One sentence for a file's missing standards, ending in what it costs."""
+    parts = [f"{label} {MISSING_IS_REASONS.get(why, why)}" for label, why in missing.items()]
+    cost = "no mass reported for this file" if whole_file else (
+        "no mass reported for the congeners " + " and ".join(missing) + " normalises")
+    return "; ".join(parts) + ": " + cost
+
+
 @dataclass(frozen=True)
 class FailingItem:
     """One row of the Overview's "needs attention" table."""
@@ -303,6 +339,8 @@ class RunSummary:
     censored_cells: int = 0
     censorable_cells: int = 0
     unusable: list[str] = field(default_factory=list)
+    #: File id -> {internal-standard label: reason}, for every reported file lacking one.
+    missing_standards: dict[str, dict[str, str]] = field(default_factory=dict)
     failing: list[FailingItem] = field(default_factory=list)
     fit_ok: bool = True
     fit_reason: str = ""
@@ -495,8 +533,8 @@ def summarise(result) -> RunSummary:
     * **It is "nothing", not "heavily".** Across one run's fifteen samples the censored share
       runs from 59% to 96%, so any fractional "heavily censored" threshold is a knob fitted to
       one run's chemistry. Whether a file reported *anything at all* is a property of the file,
-      needs no threshold, and on that run picks out exactly the one sample whose ground truth
-      appears to have been swapped with a blank.
+      needs no threshold, and on that run picks out exactly the one sample that reported
+      nothing.
     """
     summary = RunSummary()
     fit = getattr(result, "fit", None)
@@ -584,6 +622,24 @@ def summarise(result) -> RunSummary:
                 )
             )
 
+    # ---- internal standards: no standard, no mass ----------------------------------------
+    is_labels = [str(getattr(a, "label", "")) for a in (getattr(result, "analytes", None) or [])
+                 if str(getattr(a, "role", "")).startswith("IS_")]
+    for file_id, missing in missing_standards(result).items():
+        if file_id not in reported:
+            continue
+        summary.missing_standards[file_id] = missing
+        whole = bool(is_labels) and set(missing) >= set(is_labels)
+        summary.failing.append(
+            FailingItem(
+                file_id,
+                "internal standard missing",
+                missing_standard_text(missing, whole),
+                tone="error",
+                weight=W_NO_PEAKS,
+            )
+        )
+
     # ---- the run's own losses -----------------------------------------------------------
     if not blank_ids:
         summary.failing.append(
@@ -658,10 +714,19 @@ def _calibration_items(result) -> list[FailingItem]:
     information. The Calibration tab is where the analyst goes next. It already names every
     one of them, per injection, with the guard's own reason.
     """
+    items: list[FailingItem] = []
+    for name, reason in (getattr(result, "excluded_calibrations", None) or {}).items():
+        items.append(
+            FailingItem(
+                str(name),
+                "calibration injection excluded",
+                f"{reason}, so it anchors no file and supplies no response factor",
+                weight=W_RRF_REFUSED,
+            )
+        )
     calibration = getattr(result, "calibration", None)
     if calibration is None:
-        return []
-    items: list[FailingItem] = []
+        return items
     invalid = dict(getattr(calibration, "invalid", None) or {})
     analytes = getattr(result, "analytes", None) or []
     if invalid:
@@ -696,7 +761,8 @@ def verdict(summary: RunSummary) -> tuple[str, str, str]:
 
     * **red**: the run-fit guard failed. Every number was still computed, and the reason is
       carried *verbatim* from ``core.calibrate.rt_fit_quality`` rather than paraphrased,
-      because paraphrasing a scientific verdict is how one becomes wrong.
+      because paraphrasing a scientific verdict is how one becomes wrong. Also red: a reported
+      file with no usable internal standard, whose masses are therefore withheld.
     * **amber**: any surrogate recovery outside the band, or more than
       :data:`FLAGGED_FRACTION_LIMIT` of a file's integrations flagged, or no blanks, or a
       file that decoded to nothing.
@@ -709,6 +775,14 @@ def verdict(summary: RunSummary) -> tuple[str, str, str]:
             "Run failed the retention-time fit check",
             summary.fit_reason
             or "retention-time table does not fit this run's calibration injection",
+        )
+    if summary.missing_standards:
+        files = sorted(summary.missing_standards)
+        return (
+            "error",
+            "Internal standard missing",
+            f"{len(files)} file(s) without a usable internal standard, so their masses are "
+            "withheld: " + ", ".join(files),
         )
 
     reasons: list[str] = []
@@ -2296,6 +2370,13 @@ def flag_events(result) -> list[FlagEvent]:
                     FlagEvent(str(file_id), str(peak.label), flag, _flag_context(flag, peak))
                 )
 
+    for file_id, missing in missing_standards(result).items():
+        for label, why in missing.items():
+            events.append(
+                FlagEvent(file_id, label, "missing_is",
+                          f"{MISSING_IS_REASONS.get(why, why)}: no mass for what it normalises")
+            )
+
     events.extend(_censored_events(result))
     return events
 
@@ -2309,6 +2390,14 @@ def _flag_context(flag: str, peak) -> str:
         return f"{max(peak.i_end - peak.i_start, 0)} samples between boundaries"
     if flag == "clustered":
         return "area measured above a cluster baseline"
+    if flag == "forced":
+        return "not found by either detection test, integrated by a rule for this congener"
+    if flag == "displaced":
+        return "peak drifted outside its retention-time window; assigned to this congener by Aroclor abundance"
+    if flag == "realigned":
+        return "searched at a retention time corrected for a shift in this file's labelled standards"
+    if flag == "apportioned":
+        return "merged with a neighbour of comparable abundance; area is its share by a two-peak fit"
     return ""
 
 

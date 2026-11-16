@@ -18,6 +18,7 @@ from importlib import resources
 
 _CSV_PACKAGE = "quant209.config"
 _CSV_NAME = "canonical_peaks.csv"
+_ABUNDANCE_NAME = "aroclor_abundance.csv"
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,22 @@ def load_canonical_peaks() -> list[Analyte]:
                     f"{_CSV_NAME}: malformed row for label {row['label']!r}: {exc}"
                 ) from exc
     return analytes
+
+
+@lru_cache()
+def load_aroclor_abundance() -> dict[str, float]:
+    """Each native analyte's largest weight fraction in Aroclors 1242, 1248, 1254 and 1260.
+
+    The reference behind ``IntegrationParams.dominance_ratio``. In a concentrated sample a
+    dominant peak can drift across the boundary it shares with a neighbour, and the trace
+    alone cannot say whose peak it is. An analyst decides by knowing which congener is the
+    big one in these mixtures. This table is that knowledge, taken from published Aroclor
+    profiles rather than from any analyst's numbers. Callers must treat it as read-only.
+    """
+    path = resources.files(_CSV_PACKAGE).joinpath(_ABUNDANCE_NAME)
+    with path.open("r", newline="", encoding="utf-8") as fh:
+        lines = [line for line in fh if not line.startswith("#")]
+    return {row["label"]: float(row["fraction"]) for row in csv.DictReader(lines)}
 
 
 def analytes_by_transition(analytes: list[Analyte]) -> dict[tuple[float, float], list[Analyte]]:

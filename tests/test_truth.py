@@ -317,3 +317,42 @@ def test_workbook_samples_maps_each_workbook_to_its_own_sample_sheets(truth: Run
     ]
     assert len(owners) == len(set(owners))
     assert set(truth.areas.columns) <= set(owners) | {"8", "9", "10"}
+
+
+def test_a_re_issued_workbook_wins_by_its_date_not_by_how_its_name_sorts(tmp_path: Path):
+    """Re-issues are read in the order they were made. A tag run into a name sorts after a
+    later date stamp (a letter sorts after a digit), and ``OLD``, ``test`` and ``Copy`` sort late
+    too; none of that may decide which version is the ground truth."""
+    import os
+
+    from quant209.report.truth import _version_key
+
+    names = ["RUN_20220725.xlsx", "RUN_20220808.xlsx", "RUN_tag20220808.xlsx", "RUN_20230630.xlsx",
+             "RUN_20240612_OLD.xlsx", "RUN_test_20250101.xlsx", "RUN - Copy.xlsx", "RUN_newSheet.xlsx"]
+    for name in names:
+        (tmp_path / name).write_bytes(b"x")
+    undated = tmp_path / "RUN_newSheet.xlsx"
+    stamp = 1_719_830_000  # 2024-07-01: an undated workbook ranks by its own file date
+    os.utime(undated, (stamp, stamp))
+
+    order = [p.name for p in sorted((tmp_path / n for n in names), key=_version_key)]
+
+    assert set(order[:3]) == {"RUN_20240612_OLD.xlsx", "RUN_test_20250101.xlsx", "RUN - Copy.xlsx"}
+    assert order[3:] == ["RUN_20220725.xlsx", "RUN_20220808.xlsx", "RUN_tag20220808.xlsx",
+                         "RUN_20230630.xlsx", "RUN_newSheet.xlsx"]
+
+
+def test_a_workbooks_calibration_masses_are_read_from_its_cal_info_sheet(tmp_path: Path):
+    from quant209.report.truth import _read_cal_info
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "cal_info"
+    ws.append(["congener", "mass", "RRF"])
+    ws.append([52, 58.268, 3.48])
+    ws.append(["90+101+113", 58.46, 1.06])
+    path = tmp_path / "cal_info.xlsx"
+    wb.save(path)
+
+    sheet = openpyxl.load_workbook(path, read_only=True)["cal_info"]
+    assert _read_cal_info(sheet) == {"52": 58.268, "90+101+113": 58.46}

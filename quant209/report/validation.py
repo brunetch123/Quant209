@@ -123,6 +123,149 @@ class MassRow:
         return (self.auto - self.manual) / mean if mean else 0.0
 
 
+#: Same-file check (see :func:`verify_pairing`). A sheet disagrees with its own file when the
+#: median |log10(ours / analyst)| over the labelled standards exceeds this (4.7 %). On the
+#: archive, 99 % of sheets agree with their own file to within 0.0054 (1.2 %).
+PAIRING_FLOOR = 0.02
+#: A crossing needs the partner file to match at least this many times more closely.
+PAIRING_MARGIN = 4.0
+#: Fewest labelled standards measured on both sides for the fingerprint to say anything.
+PAIRING_MIN_STANDARDS = 4
+
+
+#: How close a workbook's group calibration mass must sit to 1/N of the certified summed mass,
+#: N being the group's congener count, to be read as one congener's mass entered for the
+#: whole group (see :func:`rebase_group_masses`).
+GROUP_REBASE_TOLERANCE = 0.10
+
+
+def rebase_group_masses(truth, analytes) -> tuple[pd.DataFrame, list[str]]:
+    """The analyst's group masses, on the summed calibration basis Quant 209 reports on.
+
+    Returns the masses and the notes to record. A co-eluting group's peak holds every congener
+    in it, so the calibration standard's mass for it is the sum of theirs. A workbook can
+    instead enter one member's mass for a group, which puts its group masses on a per-congener
+    basis, a half or a third of the summed figure, and a comparison between the two would
+    measure the convention rather than the integration.
+
+    Where a workbook's ``cal_info`` mass for a group sits within
+    :data:`GROUP_REBASE_TOLERANCE` of 1/N of the certified mass, the masses of the samples read
+    from that workbook are multiplied by the ratio. The evidence is the workbook's own
+    calibration masses; no scored value is consulted.
+    """
+    masses = truth.masses.copy()
+    cal = getattr(truth, "cal_masses", None)
+    if cal is None or cal.empty or masses.empty:
+        return masses, []
+    certified = {a.label: float(a.cal_mass) for a in analytes if a.role == "native"}
+    factors: dict[tuple[str, str], float] = {}
+    for label in cal.index:
+        if "+" not in label or label not in certified:
+            continue
+        members = label.count("+") + 1
+        for book, entered in cal.loc[label].items():
+            if entered is None or not np.isfinite(entered) or entered <= 0:
+                continue
+            ratio = certified[label] / float(entered)
+            if abs(ratio - members) / members <= GROUP_REBASE_TOLERANCE:
+                factors[(str(book), label)] = ratio
+    if not factors:
+        return masses, []
+    used: set[str] = set()
+    for sample, book in (getattr(truth, "sample_book", None) or {}).items():
+        if sample not in masses.columns:
+            continue
+        for (b, label), ratio in factors.items():
+            if b == book and label in masses.index:
+                masses.loc[label, sample] = masses.loc[label, sample] * ratio
+                used.add(b)
+    if not used:  # every sample came from a workbook already on the summed basis
+        return masses, []
+    groups = sorted({label for b, label in factors if b in used})
+    return masses, [f"analyst masses of {len(groups)} co-eluting groups re-based to the summed "
+                    f"calibration mass in {', '.join(sorted(used))}"]
+
+
+@dataclass
+class PairingRow:
+    """How one analyst sheet was paired with a data file, and the evidence for it."""
+
+    sheet: str
+    file: str               # the data file this sheet is scored against
+    own_distance: float     # fingerprint distance to the file sharing the sheet's name
+    best_other: str         # the closest other file in the run
+    best_distance: float
+    verdict: str            # "same file" | "re-paired" | "unverified" | "no fingerprint"
+
+
+def _standards_distance(theirs: pd.Series, ours: pd.Series) -> float:
+    both = [(t, o) for t, o in zip(theirs.to_numpy(float), ours.to_numpy(float))
+            if np.isfinite(t) and np.isfinite(o) and t > 0 and o > 0]
+    if len(both) < PAIRING_MIN_STANDARDS:
+        return float("nan")
+    return float(np.median([abs(np.log10(o / t)) for t, o in both]))
+
+
+def verify_pairing(
+    result: RunResult, truth_areas: pd.DataFrame
+) -> tuple[dict[str, str], list[PairingRow]]:
+    """Check that every analyst sheet is compared with the data file it came from.
+
+    A sheet and a file are matched by name, and a name can be wrong: a vial swapped at the
+    bench, or a column pasted under the wrong heading. The evidence used here is the labelled
+    standards (13C surrogates and internal standards), spiked into every file. For the same
+    file our integration and the analyst's agree to a median 0.4 %, and different files
+    differ by several percent. The native congeners, the very values being scored, are never
+    consulted, so the check cannot choose a pairing for its agreement.
+
+    A sheet is re-paired only when it and another sheet are each a decisive match for the
+    other's file (:data:`PAIRING_MARGIN`), and each disagrees with its own
+    (:data:`PAIRING_FLOOR`): a mutual crossing, which is what a swap looks like. A sheet that
+    disagrees with its own file without such a partner is reported as ``unverified`` and left
+    where it is, because the likelier explanation is an integration failure on one side.
+
+    Returns ``(aliases, rows)``: ``aliases`` maps a data file id to the analyst sheet it is
+    scored against, for :func:`join_areas`, :func:`join_masses` and :func:`join_recoveries`.
+    """
+    labelled = [a.label for a in result.analytes if a.role != "native"]
+    ours = result.areas
+    files = [f for f in result.reported_ids if f in ours.columns]
+    sheets = [c for c in truth_areas.columns if c in files and truth_areas[c].notna().any()]
+    labels = [l for l in labelled if l in ours.index and l in truth_areas.index]
+    if not labels or not sheets:
+        return {}, []
+    theirs = truth_areas.loc[labels]
+    mine = ours.loc[labels]
+    dist = {(s, f): _standards_distance(theirs[s], mine[f]) for s in sheets for f in files}
+    own = {s: dist[(s, s)] for s in sheets}
+    best: dict[str, tuple[float, str]] = {}
+    for s in sheets:
+        others = [(d, f) for (ss, f), d in dist.items() if ss == s and f != s and np.isfinite(d)]
+        best[s] = min(others) if others else (float("nan"), "")
+
+    def crossed(s: str) -> bool:
+        d_own, (d_best, partner) = own[s], best[s]
+        return (np.isfinite(d_own) and np.isfinite(d_best) and d_own >= PAIRING_FLOOR
+                and d_best * PAIRING_MARGIN <= d_own and partner in own)
+
+    aliases: dict[str, str] = {}
+    rows: list[PairingRow] = []
+    for s in sheets:
+        d_own, (d_best, partner) = own[s], best[s]
+        mutual = crossed(s) and crossed(partner) and best[partner][1] == s
+        if mutual:
+            aliases[partner] = s
+            verdict, file = "re-paired", partner
+        elif not np.isfinite(d_own):
+            verdict, file = "no fingerprint", s
+        elif d_own < PAIRING_FLOOR:
+            verdict, file = "same file", s
+        else:
+            verdict, file = "unverified", s
+        rows.append(PairingRow(s, file, d_own, partner, d_best, verdict))
+    return aliases, rows
+
+
 @dataclass
 class RecoveryRow:
     """One joined (sample, homolog) surrogate-recovery comparison, as a fraction."""

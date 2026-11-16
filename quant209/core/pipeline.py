@@ -109,11 +109,12 @@ from .calibrate import (
 )
 from .config import Analyte, load_canonical_peaks
 from .integrate import integrate_run
-from .mzml import read_srm_mzml
-from .peaks import IntegrationParams, PeakResult
+from .mzml import get_transition, read_srm_mzml
+from .peaks import IntegrationParams, PeakResult, local_maxima, smooth
 from .qaqc import QaqcParams, censor_below_loq, compute_loq, sample_flags
 from .quantify import (
     CalibrationModel,
+    IS_ROLES,
     average_calibrations,
     build_calibration,
     compute_recoveries,
@@ -205,6 +206,11 @@ class FileRecord:
     #: This file's usable internal-standard areas (see
     #: :func:`core.quantify.internal_standard_areas`).
     is_areas: dict[str, float] = field(default_factory=dict)
+    #: For each internal standard, the tallest point on its channel within
+    #: :data:`IS_PRESENCE_WINDOW` of where it was searched for, smoothed. Read only for a
+    #: standard that was not detected, to tell one that is not in the injection at all from
+    #: one that is there but was not found where expected (:func:`classify_missing_standards`).
+    is_window_max: dict[str, float] = field(default_factory=dict)
     #: When the instrument acquired this file, from the mzML's ``startTimeStamp``. ``None``
     #: when the conversion carries no timestamp. It is what orders the run for reference
     #: bracketing, so its absence is reported rather than guessed around.
@@ -317,6 +323,10 @@ class RunResult:
     #: :func:`nearest_calibration`. Persisted because an integration cannot be checked
     #: without knowing the retention times it was performed at.
     calibration_for: dict[str, str] = field(default_factory=dict)
+    #: Calibration injections whose retention-time table did not fit, keyed by name, with the
+    #: fit check's reason. They anchor no other file and contribute no response factor (see
+    #: :func:`select_calibrations`). Empty when every injection fits, or when none does.
+    excluded_calibrations: dict[str, str] = field(default_factory=dict)
 
     @property
     def skipped_analytes(self) -> dict[str, list[str]]:
@@ -462,6 +472,19 @@ def nearest_calibration(
 #: argue about would start discarding good data.
 IS_CONSISTENCY_RANGE = (0.2, 5.0)
 
+#: Two internal standards that leave ``IS_CONSISTENCY_RANGE`` together, within this factor of
+#: each other, moved because the whole injection did: a diluted or concentrated extract, or a
+#: different injection volume. Both standards and every analyte scale alike, so the
+#: analyte-to-standard ratio that every mass is computed from is unchanged, and the standards
+#: are used as measured. A mis-integrated standard moves alone, by an order of magnitude or more.
+#: On the archive the diluted samples' two standards agree within 6%.
+IS_DILUTION_AGREEMENT = 1.5
+
+#: The furthest a file's internal standards may move together and still be read as a dilution
+#: or concentration. Beyond it the standards have not been measured: on the archive the two
+#: files whose standards came out at a thousandth of the run median were integration failures.
+IS_DILUTION_RANGE = (0.01, 100.0)
+
 
 def reject_inconsistent_standards(
     records: Mapping[str, "FileRecord"], reported_ids: Sequence[str]
@@ -474,6 +497,10 @@ def reject_inconsistent_standards(
     times the samples'), so including them would move the median toward a population the
     samples are not part of.
 
+    A file whose standards all left the band together, in step, is a diluted or concentrated
+    injection rather than a mis-integration (``IS_DILUTION_AGREEMENT``). Its standards are
+    kept and the reading is noted. Only a standard that moved on its own is dropped.
+
     Dropping the area, rather than correcting it, is the whole point: a congener normalised
     by a standard that was never measured is not a quantity, and the pipeline reports it as
     unquantified instead of as a plausible wrong number.
@@ -481,27 +508,45 @@ def reject_inconsistent_standards(
     notes: list[str] = []
     if len(reported_ids) < 3:
         return notes  # too few files for a median to mean anything
-    labels = {label for fid in reported_ids for label in records[fid].is_areas}
     low, high = IS_CONSISTENCY_RANGE
-    for label in sorted(labels):
-        areas = {
-            fid: records[fid].is_areas[label]
-            for fid in reported_ids
+    medians: dict[str, float] = {}
+    for label in sorted({label for fid in reported_ids for label in records[fid].is_areas}):
+        values = [records[fid].is_areas[label] for fid in reported_ids if label in records[fid].is_areas]
+        if len(values) >= 3:
+            median = float(np.median(values))
+            if median > 0:
+                medians[label] = median
+    for fid in reported_ids:
+        ratios = {
+            label: records[fid].is_areas[label] / median
+            for label, median in medians.items()
             if label in records[fid].is_areas
         }
-        if len(areas) < 3:
+        outside = [label for label, ratio in ratios.items() if not low <= ratio <= high]
+        if not outside:
             continue
-        median = float(np.median(list(areas.values())))
-        if median <= 0:
+        smallest, largest = min(ratios.values()), max(ratios.values())
+        in_step = (
+            len(ratios) >= 2
+            and smallest > 0
+            and largest / smallest <= IS_DILUTION_AGREEMENT
+            and IS_DILUTION_RANGE[0] <= smallest
+            and largest <= IS_DILUTION_RANGE[1]
+        )
+        if in_step:
+            factor = float(np.exp(np.mean(np.log(list(ratios.values())))))
+            notes.append(
+                f"{fid}: every internal standard at {factor:.2f} times the run median, in step, "
+                f"read as a diluted or concentrated injection. The standards are used as measured"
+            )
             continue
-        for fid, area in areas.items():
-            if area < low * median or area > high * median:
-                del records[fid].is_areas[label]
-                notes.append(
-                    f"{fid}: internal standard {label} integrated to {area:,.0f} against a run "
-                    f"median of {median:,.0f}, so it is not used. Congeners normalised by it are "
-                    f"reported unquantified"
-                )
+        for label in outside:
+            area = records[fid].is_areas.pop(label)
+            notes.append(
+                f"{fid}: internal standard {label} integrated to {area:,.0f} against a run "
+                f"median of {medians[label]:,.0f}, so it is not used. Congeners normalised by it "
+                f"are reported unquantified"
+            )
     return notes
 
 
@@ -596,11 +641,260 @@ def _integrate_one(
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             record.peaks = integrate_run(chroms, analytes, anchors, params)
+        record.is_window_max = _standard_window_max(chroms, analytes, anchors, params)
     finally:
         del chroms
     placed = {p.label for p in record.peaks}
     record.skipped_analytes = [a.label for a in analytes if a.label not in placed]
     record.is_areas = internal_standard_areas(record.peaks, analytes)
+
+
+#: How far either side of its expected retention time an internal standard's channel is read
+#: to decide whether the standard is in the injection at all (minutes). Wider than the drift
+#: any calibration corrects, narrower than the gap between the two standards.
+IS_PRESENCE_WINDOW = 1.0
+
+#: A channel whose tallest point in that window stays below this share of the standard's
+#: typical peak height in the run's samples and blanks carries no standard. Measured case: the
+#: one archive injection without an internal standard tops out at 152 counts on the 30D
+#: channel and 223 on the 204 channel, against standard peaks of 9,000 to 14,000 in the files
+#: around it.
+IS_PRESENCE_FRACTION = 0.05
+
+#: Sample-level flag for an internal standard a reported file has no usable area for, as
+#: ``missing_internal_standard:<label>=<reason>``. ``reason`` is ``absent`` (the standard is not
+#: in the injection), ``not_found`` (its channel carries a peak near where it was expected, but
+#: no standard was detected there) or ``rejected`` (detected, and refused by
+#: :func:`reject_inconsistent_standards`). Every congener the standard normalises is then
+#: reported without a mass. A number scaled by a standard that was never measured would be a
+#: guess, and no number is the honest result.
+MISSING_IS_FLAG = "missing_internal_standard"
+
+
+def _standard_window_max(
+    chroms, analytes: list[Analyte], anchors: dict[str, float], params: IntegrationParams
+) -> dict[str, float]:
+    """Each internal standard's tallest smoothed point within :data:`IS_PRESENCE_WINDOW`."""
+    out: dict[str, float] = {}
+    for analyte in analytes:
+        if analyte.role not in IS_ROLES or analyte.label not in anchors:
+            continue
+        chrom = get_transition(chroms, analyte.q1, analyte.q3)
+        if chrom is None or chrom.times.size < 3:
+            continue
+        window = np.abs(chrom.times - anchors[analyte.label]) <= IS_PRESENCE_WINDOW
+        if window.any():
+            trace = smooth(chrom.intensities, params.smooth_window, params.smooth_poly)
+            out[analyte.label] = float(np.max(trace[window]))
+    return out
+
+
+def classify_missing_standards(
+    records: Mapping[str, "FileRecord"], reported_ids: Sequence[str], is_labels: Sequence[str]
+) -> dict[str, dict[str, str]]:
+    """File id -> {internal-standard label: reason} for every standard a reported file lacks.
+
+    Reasons as in :data:`MISSING_IS_FLAG`. "Absent" is judged against the standard's own
+    typical height in this run's reported files, so it needs no absolute threshold: a channel
+    that stays below :data:`IS_PRESENCE_FRACTION` of it near the expected time has no standard.
+    A file that decoded to nothing is reported as such elsewhere and is not classified here.
+    """
+    typical: dict[str, float] = {}
+    for label in is_labels:
+        heights = [
+            float(peak.height)
+            for fid in reported_ids
+            for peak in records[fid].peaks
+            if peak.label == label and peak.detected and peak.height > 0
+        ]
+        typical[label] = float(np.median(heights)) if heights else float("nan")
+    out: dict[str, dict[str, str]] = {}
+    for fid in reported_ids:
+        record = records[fid]
+        if not record.usable:
+            continue
+        for label in is_labels:
+            if label in record.is_areas:
+                continue
+            peak = next((p for p in record.peaks if p.label == label), None)
+            if peak is not None and peak.detected:
+                reason = "rejected"
+            else:
+                height = record.is_window_max.get(label, 0.0)
+                expected = typical.get(label, float("nan"))
+                absent = not np.isfinite(expected) or height < IS_PRESENCE_FRACTION * expected
+                reason = "absent" if absent else "not_found"
+            out.setdefault(fid, {})[label] = reason
+    return out
+
+
+def _missing_standard_note(name: str, missing: dict[str, str], is_labels: Sequence[str],
+                           expected_rt: Mapping[str, float]) -> str | None:
+    """The run note for a file's missing standards. ``rejected`` ones are noted by the guard."""
+    own = {label: why for label, why in missing.items() if why != "rejected"}
+    if not own:
+        return None
+    parts = []
+    for label, why in own.items():
+        rt = expected_rt.get(label)
+        where = f" at {rt:.2f} min" if rt is not None else ""
+        if why == "absent":
+            parts.append(f"internal standard {label} is not in this injection (no peak within "
+                         f"{IS_PRESENCE_WINDOW:g} min of its expected time{where})")
+        else:
+            parts.append(f"internal standard {label} was not found at its expected time{where}, "
+                         "although its channel carries a peak nearby. Check the retention times")
+    scope = ("this file" if set(missing) >= set(is_labels)
+             else "the congeners " + " and ".join(missing) + " normalises")
+    return f"{name}: " + "; ".join(parts) + f". No mass is reported for {scope}"
+
+
+#: How far either side of its expected time a lost labelled standard is looked for (minutes).
+LANDMARK_SEARCH = 0.4
+#: The peak found there must reach this share of the standard's typical height in the run.
+LANDMARK_FRACTION = 0.15
+#: The standards found must agree on the shift to within this (minutes).
+LANDMARK_AGREEMENT = 0.1
+#: The shift is applied this far beyond the first and last standard that moved (minutes).
+LANDMARK_MARGIN = 1.0
+#: Peak flag for an analyte searched at a retention time moved by :func:`realign_shifted_file`.
+REALIGNED_FLAG = "realigned"
+
+
+def landmark_labels(analytes: Sequence[Analyte]) -> set[str]:
+    """Labelled standards on channels that carry no native congener.
+
+    On such a channel the tallest peak near the expected time can only be the standard, so its
+    position is evidence of where this file's chromatography put that part of the run.
+    """
+    native = {(round(a.q1, 1), round(a.q3, 1)) for a in analytes if a.role == "native"}
+    return {a.label for a in analytes
+            if a.role != "native" and (round(a.q1, 1), round(a.q3, 1)) not in native}
+
+
+def typical_heights(
+    records: Mapping[str, "FileRecord"], ids: Sequence[str], labels: set[str]
+) -> dict[str, float]:
+    """Median height of each label's detected peaks across ``ids``."""
+    out: dict[str, float] = {}
+    for label in labels:
+        heights = [float(p.height) for fid in ids for p in records[fid].peaks
+                   if p.label == label and p.detected and p.height > 0]
+        out[label] = float(np.median(heights)) if heights else float("nan")
+    return out
+
+
+def realign_shifted_file(
+    record: "FileRecord", analytes: list[Analyte], anchors: dict[str, float],
+    params: IntegrationParams, typical: Mapping[str, float], landmarks: set[str],
+) -> str | None:
+    """Re-integrate a file whose labelled standards moved together, where they went.
+
+    Each file is integrated at the retention times of its nearest calibration injection. If
+    part of one file's chromatogram elutes late, the analytes there are searched in the wrong
+    place and reported absent, internal standard included. Measured case: in one archive file
+    everything from 16 to 24 min eluted 0.2 min late; its internal standard 30D and three
+    surrogates were lost, and with them the masses of a hundred congeners.
+
+    The labelled standards are spiked into every file, so they show where this file's
+    chromatography went. The correction acts only when at least two of them (on channels with
+    no native congener, :func:`landmark_labels`) were lost here, are found within
+    :data:`LANDMARK_SEARCH` at :data:`LANDMARK_FRACTION` of their usual height, and agree on
+    the shift. Analytes from the first to the last moved standard, plus
+    :data:`LANDMARK_MARGIN`, are then searched that much later. The new integration is kept
+    only if it recovers those standards, loses no standard that was found before, and finds no
+    fewer native peaks in that span. Otherwise the file is left exactly as it was. Every moved
+    peak carries the ``realigned`` flag. Returns the run note, or ``None``.
+    """
+    by_label = {p.label: p for p in record.peaks}
+    lost = [label for label in landmarks
+            if label in anchors and label in by_label and not by_label[label].detected
+            and np.isfinite(typical.get(label, np.nan))]
+    if len(lost) < 2 or not record.mzml.exists():
+        return None
+    chroms = read_srm_mzml(record.mzml)
+    try:
+        return _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost)
+    finally:
+        del chroms
+
+
+def _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost):
+    by_label = {p.label: p for p in record.peaks}
+    analyte_by = {a.label: a for a in analytes}
+    found: dict[str, float] = {}
+    for label in lost:
+        analyte = analyte_by[label]
+        chrom = get_transition(chroms, analyte.q1, analyte.q3)
+        if chrom is None or chrom.times.size < 5:
+            continue
+        trace = smooth(chrom.intensities, params.smooth_window, params.smooth_poly)
+        near = np.abs(chrom.times - anchors[label]) <= LANDMARK_SEARCH
+        maxima = [int(i) for i in local_maxima(trace) if near[int(i)]]
+        if not maxima:
+            continue
+        top = max(maxima, key=lambda i: trace[i])
+        if trace[top] >= LANDMARK_FRACTION * typical[label]:
+            found[label] = float(chrom.times[top]) - anchors[label]
+    if len(found) < 2:
+        return None
+    shift = float(np.median(list(found.values())))
+    if abs(shift) <= params.rt_window / 2 or any(
+        abs(offset - shift) > LANDMARK_AGREEMENT for offset in found.values()
+    ):
+        return None
+    first = min(anchors[label] for label in found)
+    last = max(anchors[label] for label in found)
+    lo, hi = first - LANDMARK_MARGIN, last + LANDMARK_MARGIN
+    moved = {label: rt + shift if lo <= rt <= hi else rt for label, rt in anchors.items()}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        peaks = integrate_run(chroms, analytes, moved, params)
+    after = {p.label: p for p in peaks}
+    if not all(label in after and after[label].detected for label in found):
+        return None
+    if any(by_label[label].detected and not (label in after and after[label].detected)
+           for label in landmarks if label in by_label):
+        return None
+    span = [a.label for a in analytes
+            if a.role == "native" and a.label in anchors and lo <= anchors[a.label] <= hi]
+    before_n = sum(1 for label in span if label in by_label and by_label[label].detected)
+    after_n = sum(1 for label in span if label in after and after[label].detected)
+    if after_n < before_n:
+        return None
+    for peak in peaks:
+        if peak.label in anchors and lo <= anchors[peak.label] <= hi:
+            peak.flags.append(REALIGNED_FLAG)
+    record.peaks = peaks
+    record.is_areas = internal_standard_areas(peaks, analytes)
+    record.is_window_max = _standard_window_max(chroms, analytes, moved, params)
+    return (f"{record.entry.name}: labelled standards {', '.join(sorted(found))} eluted "
+            f"{shift:+.2f} min from where the calibration puts them, so every analyte from "
+            f"{lo:.2f} to {hi:.2f} min was searched {shift:+.2f} min away. "
+            f"Native peaks found there: {before_n} before, {after_n} after")
+
+
+def select_calibrations(
+    fits: Mapping[str, "RunFitReport"], order: Sequence[str]
+) -> tuple[list[str], dict[str, str]]:
+    """Which calibration injections may anchor files and supply response factors.
+
+    Every injection is asked the run-fit question. One whose retention-time table does not
+    fit is a different chromatographic frame, or an injection that failed, and its anchors
+    send every file integrated at them to the wrong retention times. Measured case: a run's
+    first calibration sat 4.3 min late against its other three, and the four files nearest it
+    in time, a sample, a reference injection and two blanks, were all integrated there and
+    lost both internal standards. Such an injection is excluded, provided another fits. If
+    none fits, all are kept and the run fails the fit check as it always did.
+
+    Returns the usable names in ``order``, and ``{excluded name: reason}``.
+    """
+    usable = [name for name in order if name in fits and fits[name].fit_ok]
+    if not usable:
+        return [name for name in order if name in fits], {}
+    excluded = {name: (fits[name].reason or "retention-time table does not fit")
+                for name in order if name in fits and name not in usable}
+    return usable, excluded
 
 
 # --------------------------------------------------------------------------------------
@@ -693,6 +987,8 @@ def run_analysis(
     # :func:`nearest_calibration` for the drift this corrects. Each injection is read,
     # anchored and released in turn: only the anchor tables are kept.
     anchors_by_cal: dict[str, dict[str, float]] = {first_cal.name: anchors}
+    fit_by_cal = {first_cal.name: fit}
+    alignment_by_cal = {first_cal.name: alignment}
     for extra in cal_entries[1:]:
         extra_mzml = _mzml_path(extra, converted_dir)
         if not extra_mzml.exists():
@@ -703,11 +999,25 @@ def run_analysis(
                 continue
             extra_seeded = seed_from_standards(extra_chroms, analytes, params)
             extra_alignment = align_rt_map(extra_chroms, extra_seeded, params)
-            anchors_by_cal[extra.name] = build_anchors(
+            extra_anchors = build_anchors(
                 extra_chroms, extra_seeded, params, alignment=extra_alignment
             )
+            anchors_by_cal[extra.name] = extra_anchors
+            fit_by_cal[extra.name] = rt_fit_quality(extra_chroms, extra_seeded, extra_anchors, params)
+            alignment_by_cal[extra.name] = extra_alignment
         finally:
             del extra_chroms
+
+    # A calibration whose retention-time table does not fit anchors nothing and calibrates
+    # nothing, as long as another one fits (see :func:`select_calibrations`). It is still
+    # integrated, at its own anchors, so the Calibration view shows what it is.
+    usable_cals, excluded_cals = select_calibrations(
+        fit_by_cal, [e.name for e in cal_entries if e.name in anchors_by_cal]
+    )
+    own_anchors = {name: anchors_by_cal.pop(name) for name in excluded_cals}
+    primary_cal = usable_cals[0] if usable_cals else first_cal.name
+    alignment = alignment_by_cal.get(primary_cal, alignment)
+    fit = fit_by_cal.get(primary_cal, fit)
 
     # Each calibration was anchored on its own, so each could independently slip a window
     # by one peak. Comparing them with each other catches that. See
@@ -716,9 +1026,14 @@ def run_analysis(
     anchors_by_cal, anchor_repairs = reconcile_anchors(
         anchors_by_cal, [e.name for e in cal_entries if e.name in anchors_by_cal]
     )
-    anchors = anchors_by_cal.get(first_cal.name, anchors)
+    anchors = anchors_by_cal.get(primary_cal, anchors)
 
-    notes: list[str] = list(anchor_repairs)
+    notes: list[str] = [
+        f"{name}: {reason}. This calibration injection anchors no other file and contributes "
+        "no response factor"
+        for name, reason in excluded_cals.items()
+    ]
+    notes.extend(anchor_repairs)
 
     # ---- 2) Integrate every quantified file, one at a time ------------------------------
     quantified = [e for e in entries if e.file_type in QUANTIFIED_TYPES]
@@ -737,12 +1052,17 @@ def run_analysis(
         [e.name for e in cal_entries if e.name in anchors_by_cal],
         [e.name for e in quantified],
     )
+    for name in excluded_cals:
+        calibration_for[name] = name
 
+    anchors_for_file: dict[str, dict[str, float]] = {}
     for i, entry in enumerate(quantified):
         report("integrate", i, len(quantified), entry.sample_id)
         file_id = _unique_id(entry, set(records))
         record = FileRecord(entry=entry, mzml=_mzml_path(entry, converted_dir))
-        file_anchors = anchors_by_cal.get(calibration_for.get(entry.name, ""), anchors)
+        paired = calibration_for.get(entry.name, "")
+        file_anchors = anchors_by_cal.get(paired) or own_anchors.get(paired) or anchors
+        anchors_for_file[file_id] = file_anchors
         _integrate_one(record, analytes, file_anchors, params)
         if not record.usable:
             notes.append(
@@ -756,17 +1076,45 @@ def run_analysis(
     sample_ids, blank_ids = ids_by_type["sample"], ids_by_type["blank"]
     file_ids = list(records)
 
+    # A reported file whose labelled standards moved together is searched where they went
+    # (see :func:`realign_shifted_file`). Every other file is left exactly as integrated.
+    landmarks = landmark_labels(analytes)
+    typical = typical_heights(records, sample_ids + blank_ids, landmarks)
+    for fid in sample_ids + blank_ids:
+        if records[fid].usable:
+            note = realign_shifted_file(
+                records[fid], analytes, anchors_for_file[fid], params, typical, landmarks
+            )
+            if note:
+                notes.append(note)
+
+    # A standard that was not detected never enters ``is_areas``, so nothing it normalises gets
+    # a mass. Say so, file by file, and say whether the standard is missing from the injection
+    # or was looked for in the wrong place: the two have different remedies.
+    is_labels = [a.label for a in analytes if a.role in IS_ROLES]
+    undetected = classify_missing_standards(records, sample_ids + blank_ids, is_labels)
+    for fid, missing in undetected.items():
+        record = records[fid]
+        paired = calibration_for.get(record.entry.name, "")
+        note = _missing_standard_note(
+            record.entry.name, missing, is_labels,
+            anchors_by_cal.get(paired) or own_anchors.get(paired) or anchors,
+        )
+        if note:
+            notes.append(note)
+
     # An internal standard is spiked identically into every reported file, so one that
     # disagrees with its own run is a mis-integration, and it would scale every congener
     # that shares it. Rejected here, before any mass is computed.
     notes.extend(reject_inconsistent_standards(records, sample_ids + blank_ids))
+    missing_standards = classify_missing_standards(records, sample_ids + blank_ids, is_labels)
 
     # ---- 3) Response factors, averaged over every usable calibration injection -----------
     report("quantify", 0, len(_QUANTIFY_STEPS), _QUANTIFY_STEPS[0])
     models = [
         build_calibration(records[cid].peaks, analytes, name=records[cid].entry.name)
         for cid in cal_ids
-        if records[cid].usable
+        if records[cid].usable and records[cid].entry.name not in excluded_cals
     ]
     if not models:
         raise ValueError(
@@ -879,6 +1227,8 @@ def run_analysis(
 
     flags = {
         file_id: sample_flags(recoveries.get(file_id, {}), records[file_id].peaks, qaqc)
+        + [f"{MISSING_IS_FLAG}:{label}={why}"
+           for label, why in missing_standards.get(file_id, {}).items()]
         for file_id in file_ids
     }
 
@@ -913,4 +1263,5 @@ def run_analysis(
         reference_policy=reference,
         reference_for=reference_for,
         calibration_for=calibration_for,
+        excluded_calibrations=excluded_cals,
     )

@@ -276,7 +276,7 @@ def bench_run(
 
     ``aliases`` maps a data file's sample id to the truth column it should be scored
     against. DIAGNOSTIC ONLY, for the case where the *ground truth* is provably attached to
-    the wrong file (the archive holds one sample/blank pair that looks swapped): it lets
+    the wrong file: it lets
     the corrected pairing be measured and reproduced without editing anyone's workbook. It
     must never be used to shop for a better-agreeing column.
     """
@@ -689,7 +689,11 @@ def render(
 # --------------------------------------------------------------------------------------
 
 def _apply_overrides(params: IntegrationParams, overrides: list[str]) -> IntegrationParams:
-    """Apply ``name=value`` parameter overrides, coerced to the field's declared type."""
+    """Apply ``name=value`` parameter overrides, coerced to the field's declared type.
+
+    A list of labels is given comma-separated, and empty to switch its rule off:
+    ``--param forced_riders=83,117`` or ``--param forced_present=``.
+    """
     known = {f.name for f in fields(params)}
     for item in overrides:
         name, _, raw = item.partition("=")
@@ -700,6 +704,8 @@ def _apply_overrides(params: IntegrationParams, overrides: list[str]) -> Integra
             value = raw.strip().lower() in {"1", "true", "yes"}
         elif isinstance(current, int):
             value = int(raw)
+        elif isinstance(current, tuple):
+            value = tuple(part.strip() for part in raw.split(",") if part.strip())
         else:
             value = float(raw)
         setattr(params, name, value)

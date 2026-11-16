@@ -27,9 +27,27 @@ than a convenience:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 SQRT_2PI = float(np.sqrt(2.0 * np.pi))
+
+
+@dataclass(frozen=True)
+class RiderFit:
+    """What an accepted fit says about the rider: how much, how well, how tall, and where.
+
+    ``height`` and ``centre`` exist for the caller that has no apex of its own to measure.
+    A rider with no local maximum and no visible bulge has nowhere on the trace to read a
+    height from. The trace at any one sample there is mostly its parent. The fitted
+    component's own amplitude is the only height that describes the rider.
+    """
+
+    area: float  # counts·seconds, the fitted component's analytic area
+    residual: float  # ||y - model|| / ||y|| over the fitted window
+    height: float  # counts, the fitted component's amplitude above the fit's flat offset
+    centre: float  # minutes, the fitted component's retention time
 
 #: Largest relative residual (||y - model|| / ||y||) an accepted fit may leave behind.
 #: Above this the model is not describing the trace and its apportionment means nothing.
@@ -143,12 +161,11 @@ def deconvolve_rider(
     rider_rt: float,
     neighbour_rts: list[float],
     parent_apex: int,
-) -> tuple[float, float] | None:
-    """Fitted area of the rider at ``rider_rt``, or None if the fit cannot be trusted.
+) -> RiderFit | None:
+    """Fit the rider at ``rider_rt``, or return None if the fit cannot be trusted.
 
     ``neighbour_rts`` are the retention times of the resolved peaks sharing the envelope:
-    the parent and anything else close enough to overlap it. Returns
-    ``(area, relative_residual)``.
+    the parent and anything else close enough to overlap it.
     """
     sigma0 = peak_sigma(times, detect, parent_apex)
     centres = sorted([rider_rt, *neighbour_rts])
@@ -176,4 +193,79 @@ def deconvolve_rider(
     total = sum(component_area(params, k) for k in range(len(centres)))
     if area <= 0.0 or total <= 0.0 or area / total > MAX_RIDER_SHARE:
         return None
-    return area, residual
+    return RiderFit(
+        area=area,
+        residual=residual,
+        height=float(params[1 + 2 * rider_index]),
+        centre=float(params[2 + 2 * rider_index]),
+    )
+
+
+@dataclass(frozen=True)
+class PairFit:
+    """Two comparable congeners' shares of one merged envelope."""
+
+    first: RiderFit
+    second: RiderFit
+    drift: float  # minutes both centres moved from their anchors, together
+    residual: float
+
+
+#: The least share of a merged envelope either congener must hold for a pair fit to stand. A
+#: component smaller than this is the fit spending a parameter on a shoulder of noise.
+MIN_PAIR_SHARE = 0.05
+
+
+def fit_pair(
+    times: np.ndarray,
+    signal: np.ndarray,
+    first_rt: float,
+    second_rt: float,
+    max_drift: float,
+) -> PairFit | None:
+    """Split the envelope two co-eluting congeners merged into, or None.
+
+    The model is rigid on purpose. The two congeners keep the spacing the run's own
+    calibration injection measured between them, and move together by one drift: in a
+    concentrated sample the whole window drifts, it does not rearrange. They share one width,
+    for the reason ``deconvolve_rider`` gives. The amplitudes are then a linear least-squares
+    problem, solved on a grid of drift and width. A fit that does not reproduce the envelope
+    (``MAX_RESIDUAL``), whose drift ran to the edge of what was allowed, or that leaves either
+    congener under ``MIN_PAIR_SHARE`` of the envelope, says nothing about the split.
+    """
+    lo_t, hi_t = min(first_rt, second_rt) - 0.6, max(first_rt, second_rt) + 0.6
+    window = (times >= lo_t) & (times <= hi_t)
+    if window.sum() < 12:
+        return None
+    x = times[window]
+    y = signal[window].astype(float)
+    y = y - float(np.percentile(y, 5))
+    scale = max(float(np.linalg.norm(y)), 1.0)
+    drifts = np.arange(-max_drift, max_drift + 1e-9, 0.005)
+    best = None
+    for sigma in np.arange(0.02, 0.1201, 0.005):
+        for drift in drifts:
+            g1 = np.exp(-0.5 * ((x - (first_rt + drift)) / sigma) ** 2)
+            g2 = np.exp(-0.5 * ((x - (second_rt + drift)) / sigma) ** 2)
+            design = np.vstack([g1, g2]).T
+            amps, *_ = np.linalg.lstsq(design, y, rcond=None)
+            if (amps <= 0).any():
+                continue
+            residual = float(np.linalg.norm(y - design @ amps)) / scale
+            if best is None or residual < best[0]:
+                best = (residual, float(drift), float(sigma), amps)
+    if best is None:
+        return None
+    residual, drift, sigma, amps = best
+    if residual > MAX_RESIDUAL or abs(abs(drift) - max_drift) < 0.0051:
+        return None
+    k = sigma * SQRT_2PI * 60.0
+    areas = amps * k
+    if areas.min() < MIN_PAIR_SHARE * areas.sum():
+        return None
+    return PairFit(
+        first=RiderFit(area=float(areas[0]), residual=residual, height=float(amps[0]), centre=first_rt + drift),
+        second=RiderFit(area=float(areas[1]), residual=residual, height=float(amps[1]), centre=second_rt + drift),
+        drift=drift,
+        residual=residual,
+    )

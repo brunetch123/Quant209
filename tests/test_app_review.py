@@ -901,6 +901,20 @@ def test_every_flag_in_the_run_becomes_one_event(state, qtbot, result, chroms):
     assert set(kinds) <= set(FLAG_KINDS)
 
 
+def test_a_forced_peak_says_in_words_that_a_rule_produced_it():
+    """``forced`` is the one flag that means "no test found this peak in this file".
+
+    The QA/QC table is where a reviewer meets it, so its context has to say that in a
+    sentence and not leave the cell empty: the number beside it was put there by a rule
+    that names the congener, and that is what they need to know before trusting it.
+    """
+    peak = SimpleNamespace(rt_apex=42.41, sn=36.2, i_start=10, i_end=40)
+    context = rp._flag_context("forced", peak)
+    assert "rule" in context and "detection test" in context
+    assert rp.FLAG_TONES["forced"] == "info", "how it was measured, not a defect in it"
+    assert "forced" not in rp.QUALITY_FLAGS, "a forced peak is not counted as a flagged integration"
+
+
 def test_the_filter_chips_reduce_the_rows(state, qtbot, result, chroms):
     page = review(state, qtbot, result)
     tab = page.ensure_tab(TAB_QAQC)
@@ -1280,3 +1294,29 @@ def test_the_window_still_reaches_review_and_export_without_them_being_built(
     assert window.goto_step(STEP_EXPORT)
     assert isinstance(window.page(STEP_EXPORT), ExportPage)
     assert window.header.title_label.text() == window.page(STEP_EXPORT).title
+
+
+def test_a_file_without_an_internal_standard_is_an_error_not_a_gap(tmp_path):
+    """No standard, no mass, and the analyst is told so in red: in the banner, in the
+    attention table and as a QA/QC event. Silence would read as a sample with no PCBs."""
+    result = build_result(tmp_path, bad_recovery=False, flagged=False, cal_ok=True)
+    result.flags["S2"] = ["missing_internal_standard:30D=absent"]
+
+    summary = rp.summarise(result)
+    tone, headline, why = rp.verdict(summary)
+    assert (tone, headline) == ("error", "Internal standard missing") and "S2" in why
+
+    item = next(i for i in summary.failing if i.what == "internal standard missing")
+    assert (item.where, item.tone) == ("S2", "error")
+    assert "not in this injection" in item.value and "no mass reported for this file" in item.value
+
+    events = [e for e in rp.flag_events(result) if e.kind == "missing_is"]
+    assert [(e.file_id, e.analyte) for e in events] == [("S2", "30D")]
+
+
+def test_an_excluded_calibration_is_named_in_the_attention_table(tmp_path):
+    result = build_result(tmp_path, bad_recovery=False, flagged=False, cal_ok=True)
+    result.excluded_calibrations = {"Cal01.mzML": "only 31% of the native analytes were found"}
+
+    item = next(i for i in rp.summarise(result).failing if i.what == "calibration injection excluded")
+    assert item.where == "Cal01.mzML" and "anchors no file" in item.value

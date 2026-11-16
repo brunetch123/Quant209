@@ -3,7 +3,7 @@
 # One *folder* build, not one file. A one-file build unpacks itself into a temporary
 # directory on every launch, which on a PySide6 application of this size costs several
 # seconds each time -- and cold start under three seconds is a requirement this product was
-# rebuilt to meet (see docs/validation/checkpoint-E.md). The folder is zipped for delivery
+# rebuilt to meet (see docs/METHODS.md section 6.2). The folder is zipped for delivery
 # and installed once by the installer beside it.
 #
 #   .venv\Scripts\pyinstaller.exe packaging\quant209.spec --noconfirm
@@ -21,6 +21,8 @@ datas = [
     # The canonical 185-analyte peak table: read at runtime through importlib.resources,
     # so PyInstaller cannot see it by static analysis.
     (str(project / "quant209" / "config" / "canonical_peaks.csv"), "quant209/config"),
+    # The Aroclor abundance table behind the displaced-peak rule, read the same way.
+    (str(project / "quant209" / "config" / "aroclor_abundance.csv"), "quant209/config"),
     # Combo-box chevrons referenced from the stylesheet.
     (str(project / "quant209" / "app" / "assets"), "quant209/app/assets"),
 ]

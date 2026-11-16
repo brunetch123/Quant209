@@ -29,7 +29,7 @@ no sample sheet for and which nothing above therefore reaches:
   most crowded chromatogram in the sequence). An RRF error multiplies every sample, and it is
   invisible in the mass tables whenever it cancels against an area error of the opposite sign,
   which is exactly what it did on a crowded calibration window before the cluster baseline
-  (see ``docs/METHODS.md`` section 4).
+  (see ``docs/METHODS.md`` section 2.4).
 * **Reference injections**, against the analyst's ``ref`` sheets: the surrogate masses that are
   the denominator of every recovery in the batch.
 
@@ -334,7 +334,7 @@ def bench_run(
 
     ``aliases`` maps a data file's id to the truth column it should be scored against.
     DIAGNOSTIC ONLY, for the case where the *ground truth* is provably attached to the wrong
-    file (the archive holds one sample/blank pair that looks swapped): it lets the
+    file: it lets the
     corrected pairing be measured and reproduced without editing anyone's workbook. It must
     never be used to shop for a better-agreeing column.
     """
@@ -1026,7 +1026,11 @@ def render(
 
 
 def _apply_overrides(params, overrides: list[str]):
-    """Apply ``name=value`` overrides to a params dataclass, coerced to the field's type."""
+    """Apply ``name=value`` overrides to a params dataclass, coerced to the field's type.
+
+    A list of labels is given comma-separated, and empty to switch its rule off:
+    ``--param forced_riders=83,117`` or ``--param forced_present=``.
+    """
     known = {f.name for f in fields(params)}
     for item in overrides:
         name, _, raw = item.partition("=")
@@ -1037,6 +1041,8 @@ def _apply_overrides(params, overrides: list[str]):
             value = raw.strip().lower() in {"1", "true", "yes"}
         elif isinstance(current, int):
             value = int(raw)
+        elif isinstance(current, tuple):
+            value = tuple(part.strip() for part in raw.split(",") if part.strip())
         else:
             value = float(raw)
         object.__setattr__(params, name, value)

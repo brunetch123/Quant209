@@ -797,6 +797,37 @@ def test_an_internal_standard_that_disagrees_with_its_run_is_rejected():
     assert any("204" in n and "bad" in n for n in notes), "the rejection must be recorded"
 
 
+def test_a_diluted_injection_keeps_its_internal_standards():
+    """Both standards at an eighth of the run median, in step, is a diluted extract.
+
+    Measured case: six archive samples whose two standards sat at 0.11 to 0.14 of their
+    run's median, agreeing within 6%, with areas matching the analyst's. Every mass is an
+    analyte-to-standard ratio, so the dilution cancels. Rejecting them reported 137k ng of
+    analyst mass as unquantified. A standard that collapses on its own, or both collapsing to
+    a thousandth, is still a failed integration and is still dropped.
+    """
+    from quant209.core.pipeline import FileRecord, reject_inconsistent_standards
+    from quant209.core.sequence import FileEntry
+    from pathlib import Path
+
+    def record(is204: float, is30: float) -> FileRecord:
+        rec = FileRecord(entry=FileEntry(path=Path("x.mzML"), file_type="sample"),
+                         mzml=Path("x.mzML"))
+        rec.is_areas = {"204": is204, "30D": is30}
+        return rec
+
+    records = {f"S{i}": record(65_000.0, 50_000.0) for i in range(5)}
+    records["diluted"] = record(65_000.0 * 0.125, 50_000.0 * 0.13)
+    records["lopsided"] = record(65_000.0 * 0.125, 50_000.0)
+    records["failed"] = record(65.0, 50.0)
+    notes = reject_inconsistent_standards(records, [*records])
+
+    assert records["diluted"].is_areas == {"204": 8_125.0, "30D": 6_500.0}
+    assert any("diluted" in n and "diluted or concentrated" in n for n in notes)
+    assert "204" not in records["lopsided"].is_areas and "30D" in records["lopsided"].is_areas
+    assert records["failed"].is_areas == {}, "a thousandfold collapse is not a dilution"
+
+
 def test_internal_standard_check_needs_a_population():
     """With too few files there is no median to judge against, so nothing is rejected."""
     from quant209.core.pipeline import FileRecord, reject_inconsistent_standards
@@ -808,3 +839,120 @@ def test_internal_standard_check_needs_a_population():
     records = {"only": rec}
     assert reject_inconsistent_standards(records, ["only"]) == []
     assert records["only"].is_areas == {"204": 1.0}
+
+
+def _record(label_rows, *, is_areas, window_max, usable=True):
+    """A stand-in file record: ``label_rows`` is ``[(label, detected, height), ...]``."""
+    from types import SimpleNamespace
+
+    peaks = [SimpleNamespace(label=lab, detected=det, height=h) for lab, det, h in label_rows]
+    return SimpleNamespace(peaks=peaks, is_areas=is_areas, is_window_max=window_max, usable=usable)
+
+
+def test_a_missing_internal_standard_is_classified_by_what_its_channel_carries():
+    """Measured cases. One archive injection has no internal standard at all: its 30D channel
+    tops out at 152 counts within a minute of the expected time, against standard peaks near
+    14,000 in the files around it. In another file the standard is there but eluted 0.16 min
+    late and was not detected. Both get no mass; the reason says which remedy applies."""
+    from quant209.core.pipeline import classify_missing_standards
+
+    normal = {"30D": 60_000.0}
+    records = {f"S{i}": _record([("30D", True, 14_000.0)], is_areas=dict(normal), window_max={"30D": 14_000.0})
+               for i in range(4)}
+    records["empty"] = _record([("30D", False, 150.0)], is_areas={}, window_max={"30D": 152.0})
+    records["shifted"] = _record([("30D", False, 900.0)], is_areas={}, window_max={"30D": 2_415.0})
+    records["refused"] = _record([("30D", True, 14_000.0)], is_areas={}, window_max={"30D": 14_000.0})
+    records["undecoded"] = _record([], is_areas={}, window_max={}, usable=False)
+
+    got = classify_missing_standards(records, list(records), ["30D"])
+
+    assert got == {"empty": {"30D": "absent"}, "shifted": {"30D": "not_found"},
+                   "refused": {"30D": "rejected"}}
+
+
+def test_a_calibration_whose_retention_times_do_not_fit_anchors_nothing():
+    """Measured case: a run's first calibration sat 4.3 min late against its other three. The
+    four files nearest it were integrated at its retention times and lost both internal
+    standards. It is excluded as long as another calibration fits; if none does, nothing is
+    excluded and the run fails the fit check as before."""
+    from types import SimpleNamespace
+
+    from quant209.core.pipeline import select_calibrations
+
+    fit = lambda ok, why="": SimpleNamespace(fit_ok=ok, reason=why)
+    order = ["Cal01", "Cal02", "Cal03", "Cal04"]
+
+    usable, excluded = select_calibrations(
+        {"Cal01": fit(False, "only 31% of the native analytes were found"), "Cal02": fit(True),
+         "Cal03": fit(True), "Cal04": fit(True)}, order)
+    assert usable == ["Cal02", "Cal03", "Cal04"]
+    assert excluded == {"Cal01": "only 31% of the native analytes were found"}
+
+    assert select_calibrations({c: fit(True) for c in order}, order) == (order, {})
+    assert select_calibrations({c: fit(False, "x") for c in order}, order) == (order, {})
+
+
+def _shifted_file(shifts: dict[str, float]):
+    """Synthetic file: one peak per channel, each moved by ``shifts`` from its anchor."""
+    from types import SimpleNamespace
+
+    from quant209.core.config import Analyte
+    from quant209.core.integrate import integrate_run
+    from quant209.core.mzml import Chromatogram
+    from quant209.core.peaks import IntegrationParams
+
+    spec = [("13C 15", 235.0, 165.0, "surrogate_13C", 17.47), ("30D", 304.0, 234.0, "IS_d30", 16.19),
+            ("13C 28", 269.0, 199.0, "surrogate_13C", 20.84), ("18", 256.0, 186.0, "native", 18.00),
+            ("52", 290.0, 220.0, "native", 30.00), ("13C 118", 338.0, 268.0, "surrogate_13C", 40.30)]
+    analytes = [Analyte(l, q1, q3, "tri" if role == "native" else "", 1, role, "30D", 1.0, rt)
+                for l, q1, q3, role, rt in spec]
+    times = np.arange(10.0, 45.0, 0.005)
+    rng = np.random.default_rng(3)
+    chroms = {}
+    for label, q1, q3, _role, rt in spec:
+        y = 300.0 + rng.normal(0.0, 30.0, times.size)
+        y += 1.0e4 * np.exp(-0.5 * ((times - (rt + shifts.get(label, 0.0))) / 0.03) ** 2)
+        chroms[(q1, q3)] = Chromatogram(q1=q1, q3=q3, times=times, intensities=y)
+    anchors = {a.label: a.cal_rt for a in analytes}
+    params = IntegrationParams()
+    record = SimpleNamespace(peaks=integrate_run(chroms, analytes, anchors, params),
+                             entry=SimpleNamespace(name="AN_DEMO05.mzML"), is_areas={}, is_window_max={})
+    return chroms, record, analytes, anchors, params
+
+
+def test_a_file_whose_standards_moved_together_is_searched_where_they_went():
+    """Measured case: in one archive file everything from 16 to 24 min eluted 0.2 min late. The
+    internal standard 30D and three surrogates were lost, and a hundred congeners with them."""
+    from quant209.core.pipeline import REALIGNED_FLAG, _realign_with, landmark_labels
+
+    late = {"13C 15": 0.2, "30D": 0.2, "13C 28": 0.2, "18": 0.2}
+    chroms, record, analytes, anchors, params = _shifted_file(late)
+    before = {p.label: p.detected for p in record.peaks}
+    assert not any(before[l] for l in late), "the failure: everything that moved is lost"
+
+    landmarks = landmark_labels(analytes)
+    assert landmarks == {"13C 15", "30D", "13C 28", "13C 118"}
+    lost = [l for l in landmarks if not before[l]]
+    note = _realign_with(chroms, record, analytes, anchors, params,
+                         {l: 1.0e4 for l in landmarks}, landmarks, lost)
+
+    assert note and "+0.20 min" in note
+    after = {p.label: p for p in record.peaks}
+    for label in late:
+        assert after[label].detected and REALIGNED_FLAG in after[label].flags, label
+        assert abs(after[label].rt_apex - (anchors[label] + 0.2)) < 0.02
+    for label in ("52", "13C 118"):
+        assert after[label].detected and REALIGNED_FLAG not in after[label].flags
+    assert "30D" in record.is_areas
+
+
+def test_standards_that_disagree_about_the_shift_leave_the_file_alone():
+    from quant209.core.pipeline import _realign_with, landmark_labels
+
+    chroms, record, analytes, anchors, params = _shifted_file({"13C 15": 0.2, "30D": -0.2, "13C 28": 0.2})
+    landmarks = landmark_labels(analytes)
+    original = list(record.peaks)
+    lost = [p.label for p in original if p.label in landmarks and not p.detected]
+    assert _realign_with(chroms, record, analytes, anchors, params,
+                         {l: 1.0e4 for l in landmarks}, landmarks, lost) is None
+    assert record.peaks == original

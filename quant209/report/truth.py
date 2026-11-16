@@ -74,6 +74,7 @@ from __future__ import annotations
 import re
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
@@ -187,6 +188,13 @@ class RunTruth:
     cal_rrfs: pd.DataFrame = field(default_factory=pd.DataFrame)
     ref_surrogate_masses: pd.DataFrame = field(default_factory=pd.DataFrame)
     workbook_samples: dict[str, list[str]] = field(default_factory=dict)
+    #: The calibration-standard mass (ng) each workbook's ``cal_info`` sheet enters per
+    #: (analyte label, workbook stem). It is what every RRF in that workbook divides by, so a
+    #: workbook that enters a different mass for a co-eluting group reports group masses on a
+    #: different basis (see ``report.validation.rebase_group_masses``).
+    cal_masses: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: Sample id -> the workbook stem its sheet was finally read from, after re-issues.
+    sample_book: dict[str, str] = field(default_factory=dict)
 
 
 _NON_SAMPLE_NORMALISED = frozenset(_normalised(n) for n in _NON_SAMPLE)
@@ -454,6 +462,50 @@ def _find_quant_workbooks(run_folder: Path) -> list[Path]:
     ]
 
 
+#: Words that mark a workbook as superseded or experimental (``OLD``, ``test...``, ``Copy``).
+#: Such a workbook never overrides one without the mark.
+_SUPERSEDED = re.compile(r"(?i)(?:^|[^a-z])(old|test[a-z0-9]*|copy)(?:[^a-z]|$)")
+#: A YYYYMMDD date anywhere in a workbook's name, the analyst's own version stamp. Matched
+#: without word boundaries so that a stamp run into a tag (``_tag20220808``) is still read.
+_DATE_TOKEN = re.compile(r"20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])")
+
+
+def _version_key(path: Path) -> tuple[bool, str, str]:
+    """Sort key putting a run's workbooks in the order their re-issues were made.
+
+    Re-issues of a workbook cover the same samples, and the last one read wins. Ordering by
+    filename alone made that the one whose name sorts last, which need not be the latest: a
+    tag run into a name sorts after a later date stamp, because a letter sorts after a digit.
+    Workbooks marked as superseded come first, so anything else overrides them. Then
+    the latest date stamp in the name, or the file's own modification date when the name has
+    none. Then the name, which keeps the old behaviour wherever the stamps tie.
+    """
+    stamps = _DATE_TOKEN.findall(path.stem)
+    try:
+        when = max(stamps) if stamps else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d")
+    except OSError:
+        when = ""
+    return (_SUPERSEDED.search(path.stem) is None, when, path.name)
+
+
+def _read_cal_info(ws) -> dict[str, float | None]:
+    """{analyte label: calibration-standard mass (ng)} from a workbook's ``cal_info`` sheet."""
+    names = ("congener", "label", "analyte")
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=_CAL_HEADER_SCAN_ROWS,
+                                          max_col=_CAL_MAX_COL, values_only=True)):
+        cells = [str(c).strip().lower() if isinstance(c, str) else "" for c in row]
+        if "mass" in cells and any(c in names for c in cells):
+            label_col = next(j for j, c in enumerate(cells) if c in names)
+            mass_col = cells.index("mass")
+            out: dict[str, float | None] = {}
+            for r in ws.iter_rows(min_row=i + 2, max_col=max(label_col, mass_col) + 1,
+                                  values_only=True):
+                if r[label_col] is not None:
+                    out[str(r[label_col])] = _num(r[mass_col])
+            return out
+    return {}
+
+
 def _warn_skipped(xlsx: Path, exc: Exception) -> None:
     """Warn that a workbook was skipped.
 
@@ -469,7 +521,8 @@ def _warn_skipped(xlsx: Path, exc: Exception) -> None:
 def read_run_truth(run_folder: str | Path) -> RunTruth:
     """Merge analyst ground truth from every quantification workbook in a run folder.
 
-    Later workbooks (sorted by filename) override earlier ones for the same
+    Workbooks are read in the order their re-issues were made (``_version_key``), and a
+    later one overrides an earlier one for the same
     (analyte/homolog, sample) cell, so a corrected re-issue wins over an earlier version
     covering the same samples. A malformed or unreadable workbook is skipped with a warning
     rather than aborting the whole run. See ``_warn_skipped``.
@@ -482,8 +535,10 @@ def read_run_truth(run_folder: str | Path) -> RunTruth:
     cal_rrf_records: dict[str, dict[str, float | None]] = {}
     ref_records: dict[str, dict[str, float | None]] = {}
     workbook_samples: dict[str, list[str]] = {}
+    cal_mass_records: dict[str, dict[str, float | None]] = {}
+    sample_book: dict[str, str] = {}
 
-    for xlsx in _find_quant_workbooks(run_folder):
+    for xlsx in sorted(_find_quant_workbooks(run_folder), key=_version_key):
         try:
             wb = openpyxl.load_workbook(xlsx, data_only=True, read_only=True)
         except Exception as exc:  # noqa: BLE001 - see _warn_skipped
@@ -492,6 +547,10 @@ def read_run_truth(run_folder: str | Path) -> RunTruth:
         book = xlsx.stem
         try:
             for ws in wb.worksheets:
+                if _normalised(ws.title) == "calinfo":
+                    for label, mass in _read_cal_info(ws).items():
+                        cal_mass_records.setdefault(label, {})[book] = mass
+                    continue
                 if _is_cal_sheet(ws.title):
                     for label, (cal_area, rrf) in _read_cal_sheet(ws).items():
                         cal_area_records.setdefault(label, {})[book] = cal_area
@@ -510,6 +569,7 @@ def read_run_truth(run_folder: str | Path) -> RunTruth:
                 if not any(area for area, _ in measured.values()):
                     continue
                 workbook_samples.setdefault(book, []).append(sample)
+                sample_book[sample] = book
                 for label, (area, mass) in measured.items():
                     area_records.setdefault(label, {})[sample] = area
                     mass_records.setdefault(label, {})[sample] = mass
@@ -549,4 +609,6 @@ def read_run_truth(run_folder: str | Path) -> RunTruth:
         cal_rrfs=cal_rrfs,
         ref_surrogate_masses=ref_masses.sort_index(axis=1),
         workbook_samples={k: sorted(v) for k, v in sorted(workbook_samples.items())},
+        cal_masses=pd.DataFrame(cal_mass_records).T.sort_index().sort_index(axis=1),
+        sample_book=sample_book,
     )

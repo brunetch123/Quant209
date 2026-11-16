@@ -33,6 +33,14 @@ output/
 results/
 # Pooled archive comparison; regenerate with tools/master_bench.py
 docs/validation/master*/
+# Everything else drawn from it names run folders or plots per-sample results, so it is
+# laboratory data too: the archive report (tools/master_report.py), the validation figures
+# (tools/validation_figures.py), and any slide deck built from them.
+docs/validation/*/
+docs/validation/MASTER-REPORT*.md
+docs/images/validation/
+docs/images/concepts*/
+*.pptx
 
 # -- Python ---------------------------------------------------------------
 __pycache__/

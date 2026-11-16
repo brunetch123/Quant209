@@ -276,3 +276,102 @@ def test_summary_reports_a_verdict(report, tmp_path: Path):
 
 def test_report_object_reflects_the_same_bias_row_count(report):
     assert report.n_bias_rows == 1
+
+
+def _pairing_case(swap: tuple[str, str] | None = None, broken: str | None = None):
+    """Four files whose labelled standards differ by a few percent, and the analyst's sheets."""
+    from types import SimpleNamespace
+
+    from quant209.core.config import Analyte as A
+
+    labels = ["13C 3", "13C 15", "13C 28", "13C 52", "13C 118", "30D", "204"]
+    analytes = [A(l, 300.0 + i, 200.0 + i, "", 1, "surrogate_13C" if l.startswith("13C") else "IS_d30",
+                  "30D", 10.0, 10.0 + i) for i, l in enumerate(labels)]
+    analytes.append(A("52", 292.0, 222.0, "tetra", 1, "native", "30D", 1.0, 20.0))
+    rng = np.random.default_rng(7)
+    files = ["S1", "S2", "S3", "S4"]
+    base = rng.uniform(4e4, 9e4, len(labels))
+    ours = pd.DataFrame({f: base * rng.uniform(0.85, 1.15, len(labels)) for f in files}, index=labels)
+    ours.loc["52"] = [1e5, 2e5, 3e5, 4e5]
+    truth = ours * rng.uniform(0.997, 1.003, ours.shape)  # the same files, integrated by hand
+    if swap:
+        a, b = swap
+        truth[[a, b]] = truth[[b, a]].to_numpy()
+    if broken:
+        ours.loc[labels, broken] = ours.loc[labels, broken] * 1e-3  # our standards failed there
+    result = SimpleNamespace(analytes=analytes, areas=ours, reported_ids=files)
+    return result, truth
+
+
+def test_a_swapped_pair_of_sheets_is_scored_against_the_right_files():
+    """Every comparison must set the analyst's numbers against the file they were measured
+    from, and the evidence for that is the labelled standards, never the congeners being
+    scored."""
+    from quant209.report.validation import verify_pairing
+
+    result, truth = _pairing_case(swap=("S2", "S3"))
+    aliases, rows = verify_pairing(result, truth)
+
+    assert aliases == {"S3": "S2", "S2": "S3"}
+    verdicts = {r.sheet: (r.verdict, r.file) for r in rows}
+    assert verdicts == {"S1": ("same file", "S1"), "S2": ("re-paired", "S3"),
+                        "S3": ("re-paired", "S2"), "S4": ("same file", "S4")}
+
+
+def test_a_sheet_that_matches_no_file_is_reported_not_moved():
+    """Our standards failed in one file (an integration failure, not a swap). The sheet then
+    disagrees with its own file but has no mutual partner, so it stays where it is and the
+    benchmark says it could not be verified."""
+    from quant209.report.validation import verify_pairing
+
+    result, truth = _pairing_case(broken="S4")
+    aliases, rows = verify_pairing(result, truth)
+
+    assert aliases == {}
+    assert {r.sheet: r.verdict for r in rows}["S4"] == "unverified"
+
+
+def test_a_group_entered_at_one_congeners_mass_is_re_based_to_the_summed_mass():
+    """A workbook that enters one member's calibration mass for a co-eluting group reports group
+    masses a third (or half) of the summed basis. Only those groups, and only in samples read
+    from that workbook, are re-based. Single congeners are never touched."""
+    from types import SimpleNamespace
+
+    from quant209.core.config import Analyte as A
+    from quant209.report.validation import rebase_group_masses
+
+    analytes = [A("90+101+113", 1, 1, "penta", 1, "native", "30D", 172.97, 1),
+                A("147+149", 1, 1, "hexa", 1, "native", "204", 114.47, 1),
+                A("87+125", 1, 1, "penta", 1, "native", "30D", 116.47, 1),
+                A("52", 1, 1, "tetra", 1, "native", "30D", 58.27, 1)]
+    labels = [a.label for a in analytes]
+    masses = pd.DataFrame({"S1": [100.0, 60.0, 150.0, 250.0], "S2": [100.0, 60.0, 150.0, 250.0]}, index=labels)
+    cal = pd.DataFrame({"NEW": [58.46, 58.78, 235.3, 58.15], "OLD": [172.97, 114.47, 116.47, 58.27]}, index=labels)
+    truth = SimpleNamespace(masses=masses, cal_masses=cal, sample_book={"S1": "NEW", "S2": "OLD"})
+
+    rebased, notes = rebase_group_masses(truth, analytes)
+
+    assert rebased.loc["90+101+113", "S1"] == pytest.approx(100.0 * 172.97 / 58.46)
+    assert rebased.loc["147+149", "S1"] == pytest.approx(60.0 * 114.47 / 58.78)
+    assert rebased.loc["87+125", "S1"] == 150.0, "a value that is not 1/N of the sum is left alone"
+    assert rebased.loc["52", "S1"] == 250.0
+    assert (rebased["S2"] == masses["S2"]).all(), "a workbook with summed masses is left alone"
+    assert notes and "NEW" in notes[0] and "OLD" not in notes[0]
+
+
+def test_a_template_workbook_superseded_by_a_corrected_re_issue_changes_nothing():
+    """When every sample was finally read from a re-issue with summed masses, nothing is
+    re-based and nothing is claimed."""
+    from types import SimpleNamespace
+
+    from quant209.core.config import Analyte as A
+    from quant209.report.validation import rebase_group_masses
+
+    analytes = [A("90+101+113", 1, 1, "penta", 1, "native", "30D", 172.97, 1)]
+    masses = pd.DataFrame({"S1": [300.0]}, index=["90+101+113"])
+    cal = pd.DataFrame({"TEMPLATE": [58.46], "REISSUE": [172.97]}, index=["90+101+113"])
+    truth = SimpleNamespace(masses=masses, cal_masses=cal, sample_book={"S1": "REISSUE"})
+
+    rebased, notes = rebase_group_masses(truth, analytes)
+
+    assert rebased.loc["90+101+113", "S1"] == 300.0 and notes == []

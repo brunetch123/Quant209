@@ -40,14 +40,14 @@ class IntegrationParams:
     # Over 0.02-0.15 the *outcome* is flat. The count of response factors more than 25% from
     # the analyst's does not move on five of the six (injection, workbook) pairs of the two
     # reference runs, and moves by one on the sixth, while the merge set itself shrinks
-    # monotonically across that range (37 -> 20 merged pairs on BRT Cal01). The plateau is in
+    # monotonically across that range (37 -> 20 merged pairs on one run's Cal01). The plateau is in
     # the metric, not the mechanism, so 0.05 is a point on the conservative half of a range
     # whose endpoints both pass, not a knife edge and not a value the data pins exactly.
     # Regenerate the evidence with
     # ``python tools/bench_quant.py --sweep overlap_frac=10,0.02,0.05,0.10,0.15``.
-    # Table in docs/METHODS.md section 4.
+    # Table in docs/METHODS.md section 2.4.
     overlap_frac: float = 0.05
-    integrate_on_smoothed: bool = False
+    integrate_on_smoothed: bool = False  # integrate the raw signal by default (MassHunter-like)
     #: Shoulder test: how strong the downward curvature at an analyte's apex must be, as a
     #: multiple of the trace noise, before a peak the prominence test rejected is treated as
     #: a rider on its neighbour's flank rather than as absent. Set to 0 to disable the
@@ -63,7 +63,40 @@ class IntegrationParams:
     #: Fitting two peak shapes to the envelope is what actually separates them. The fit is
     #: used only when it reproduces the trace. Otherwise the skim stands. Set False to
     #: disable and keep the skim everywhere.
-    deconvolve_shoulders: bool = True  # integrate raw signal by default (MassHunter-like)
+    deconvolve_shoulders: bool = True
+    #: Named rules: analytes integrated by a fixed rule in any file where neither the presence
+    #: test nor the shoulder test finds them. Every other rule in this engine reads the trace
+    #: and decides. These two read the label, so each list is an explicit, per-method statement
+    #: about the chromatography, kept short and kept here where a different column or method
+    #: can empty it. A peak either rule produced carries the ``forced`` flag. Consumed by
+    #: ``core.integrate.integrate_transition``. See ``docs/METHODS.md`` section 2.7 for the
+    #: evidence, including where each rule does not help.
+    #:
+    #: ``forced_riders`` are fitted against their neighbours (``core.deconvolve``) without the
+    #: curvature evidence the shoulder test asks for. Congeners 83 and 117 ride so close to a
+    #: larger neighbour that most files show no bulge at all, and were reported absent on most
+    #: of the archive's detectable rows. The fit's own quality gate still applies: a fit that
+    #: does not reproduce the trace is refused and the analyte stays absent.
+    #:
+    #: ``forced_present`` are bounded as if the presence test had accepted them. The two
+    #: listed are dominant congeners of the technical mixtures. In a concentrated sample the
+    #: apex of such a peak leaves its search window, the point examined in its place has no
+    #: prominence, and the largest peak in the chromatogram is reported absent.
+    #:
+    #: Set either to ``()`` to turn that rule off.
+    forced_riders: tuple[str, ...] = ("83", "117")
+    forced_present: tuple[str, ...] = ("90+101+113", "118")
+    #: Displaced dominant peaks. In a concentrated sample a dominant peak broadens and its top
+    #: can drift across the boundary it shares with a neighbour, so the apex search stops on
+    #: its rising flank and the neighbour is credited with the whole peak. When an analyte's
+    #: search ends on its territory edge with the trace still climbing into the neighbour's,
+    #: and that climb leads to the very top the neighbour claimed, the peak is given to the
+    #: analyte if it is at least this many times more abundant than the neighbour in the
+    #: published Aroclor profiles (``core.config.load_aroclor_abundance``) and is itself a
+    #: major congener. The two are then resolved together, so no area is counted twice, and
+    #: the analyte carries the ``displaced`` flag. Set to 0 to turn the rule off. See
+    #: ``docs/METHODS.md`` section 2.8.
+    dominance_ratio: float = 10.0
 
 
 @dataclass

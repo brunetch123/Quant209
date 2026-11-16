@@ -78,6 +78,28 @@ def test_overlap_frac_default_is_the_measured_cluster_threshold():
     assert IntegrationParams().overlap_frac == 0.05
 
 
+def test_the_named_rules_name_four_congeners_and_no_more():
+    """The two label lists are the only rules in the engine that read a label, not a trace.
+
+    Pinned so that growing either list is a deliberate, reviewed act: each entry is a claim
+    about the chromatography of one method, measured against the archive
+    (``docs/METHODS.md`` section 2.7), and a label added casually would be integrated by
+    rule in every file where the trace shows nothing.
+    """
+    params = IntegrationParams()
+    assert params.forced_riders == ("83", "117")
+    assert params.forced_present == ("90+101+113", "118")
+    # Immutable defaults: one instance emptying a list must not empty it for the next.
+    assert IntegrationParams(forced_riders=()).forced_riders == ()
+    assert IntegrationParams().forced_riders == ("83", "117")
+
+
+def test_a_displaced_peak_needs_a_tenfold_abundance_advantage():
+    """An order of magnitude in the published Aroclor profiles before the trace's ambiguity is
+    settled by composition. Pinned so that loosening it is a deliberate act."""
+    assert IntegrationParams().dominance_ratio == 10.0
+
+
 def test_peak_result_default_eq_and_flags():
     """No array fields, so default dataclass eq should work (unlike Chromatogram, which needs
     eq=False for its ndarray fields), and the flags list defaults to its own empty list per

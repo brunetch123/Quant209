@@ -29,25 +29,63 @@ mass ≥ 1 ng).
 
 | | rows | median &#124;RPD&#124; | within ±25% | total ratio |
 |---|---|---|---|---|
-| Peak areas | 41,240 | **2.13%** | **87.1%** | 0.975 |
-| Congener masses | 30,549 | **4.61%** | **78.7%** | 0.991 |
-| Surrogate recoveries | 6,442 | 0.030 mean absolute error | | |
+| Peak areas | 41,240 | **2.04%** | **88.8%** | 1.004 |
+| Congener masses | 30,622 | **4.24%** | **84.1%** | 1.017 |
+| Surrogate recoveries | 6,591 | 0.021 mean absolute error | | |
 
-Areas meet the acceptance criteria (median ≤ 10%, ≥ 80% within ±25%). Masses meet the median
-criterion. They fall 1.3 points short of the coverage one. A mass multiplies three measured
-quantities, so it inherits the area disagreement and adds to it.
+Areas and masses both meet the acceptance criteria (median ≤ 10%, ≥ 80% within ±25%). A
+mass multiplies three measured quantities, so it inherits the area disagreement and adds to
+it, and its coverage clears the gate by less.
 
-**No run disagrees by more than 7.4% at the median.** The best is 0.69%.
+**No run disagrees by more than 7.4% at the median.** The best is 0.67%. **No sample's
+total native PCB mass differs from the analyst's by 2× or more**, apart from two trace-level
+samples where the difference is a few nanograms.
+
+**Every comparison is checked to be the same data file.** The labelled standards spiked into
+every file act as a fingerprint: for the same file our areas and the analyst's agree to a
+median 0.4%. A sheet is scored against a different file only on a decisive, mutual match.
+Every verdict is written to `pairing.csv` (see
+[`../METHODS.md`](../METHODS.md) section 6.1).
+
+**The analyst's values are taken from their final workbook, on one basis.** Re-issued
+workbooks are read in the order they were issued, not by how their names sort. And where a
+workbook enters one member's calibration mass for a co-eluting group instead of the members'
+sum, its group masses are put on the summed basis Quant 209 reports on, so every comparison is
+like for like.
+
+## Changes since 1.0.0
+
+| | 1.0.0 | 1.1.0 | current |
+|---|---|---|---|
+| Peak areas: median &#124;RPD&#124;, within ±25% | 2.13%, 87.1% | 2.12%, 87.4% | 2.04%, 88.8% |
+| Congener masses: median &#124;RPD&#124;, within ±25% | 4.61%, 78.7% | 4.60%, 79.0% | 4.24%, 84.1% |
+| Total absolute mass error, detectable rows | 3,214k ng | 3,004k ng | 1,565k ng |
+| Detectable rows reported at 1% or less of the analyst's value | 1,673 | 1,340 | 1,174 |
+
+1.1.0's changes come from the named rules for congeners 83, 117, 90+101+113 and 118
+([`../METHODS.md`](../METHODS.md) section 2.7), whose peaks carry the `forced` flag. The
+current code adds the displaced-peak rule (section 2.8). In a concentrated sample a dominant
+peak can drift into a minor neighbour's retention-time window, and the neighbour was credited
+with all of it. The rule gives 108 such peaks back, flagged `displaced`. The current code
+also reads a sample whose internal standards are all diluted in step as a dilution rather
+than refusing it (section 7.3), which quantifies six more samples, and splits envelopes
+two comparable congeners merged into by a two-peak fit, flagged `apportioned`. It no longer
+lets a calibration injection whose retention times do not fit anchor other files, searches a
+file whose labelled standards moved where they went (flagged `realigned`), reports a missing
+internal standard as an error with no mass, and scores every analyst sheet against the file it
+came from. Together with the ground-truth corrections above, the total absolute mass error
+is 48% below 1.1.0's. The area median barely moves, because these act on few rows. The named rules, and two details of the displaced-peak rule, were chosen by reading
+this same comparison, so that share of the improvement is in-sample.
 
 ## Agreement against signal
 
 | manual area (counts·s) | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| > 10⁶ | 2,391 | 0.7% | 88.1% |
-| 10⁵ – 10⁶ | 6,316 | 1.0% | 91.2% |
-| 10⁴ – 10⁵ | 13,017 | 1.7% | 89.4% |
-| 10³ – 10⁴ | 19,516 | 3.3% | 84.0% |
-| 10² – 10³ | 25,752 | 12.4% | 66.4% |
+| > 10⁶ | 2,391 | 0.6% | 92.3% |
+| 10⁵ – 10⁶ | 6,316 | 1.0% | 93.4% |
+| 10⁴ – 10⁵ | 13,017 | 1.7% | 91.1% |
+| 10³ – 10⁴ | 19,516 | 3.2% | 85.3% |
+| 10² – 10³ | 25,752 | 12.1% | 67.4% |
 | < 10² | 51,333 | 109% | 17.7% |
 
 The bottom two bands are below the reporting threshold. In that range, manual integration is
@@ -58,15 +96,15 @@ for completeness, not as a claim.
 
 | homolog | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| mono | 751 | 1.10% | 98.0% |
-| di | 3,551 | 1.63% | 97.4% |
-| tri | 5,717 | 1.98% | 95.7% |
-| tetra | 7,712 | 2.21% | 87.4% |
-| penta | 9,029 | 3.01% | 78.8% |
-| hexa | 8,930 | 1.97% | 84.8% |
-| hepta | 4,416 | 1.77% | 89.2% |
-| octa | 975 | 3.52% | 74.6% |
-| nona | 147 | 5.19% | 87.8% |
+| mono | 751 | 1.07% | 99.3% |
+| di | 3,551 | 1.60% | 98.5% |
+| tri | 5,717 | 1.95% | 96.6% |
+| tetra | 7,712 | 2.18% | 88.5% |
+| penta | 9,029 | 2.71% | 82.5% |
+| hexa | 8,930 | 1.91% | 85.8% |
+| hepta | 4,416 | 1.68% | 91.0% |
+| octa | 975 | 3.36% | 77.0% |
+| nona | 147 | 5.03% | 89.8% |
 | deca | 12 | 9.17% | 91.7% |
 
 Penta is the weakest well-populated homolog. Its transition carries 37 analytes, the most
@@ -74,12 +112,30 @@ crowded window in the method. Crowding is where automated and manual integration
 
 ## Where the disagreement is
 
-1,673 rows (4.1% of comparisons but 12.1% of detectable area) are reported at 1% or less of the
-analyst's value. Five congeners (83, 117, 115, 88, 143) supply 675 of them. Each elutes on the
-leading edge of a much larger neighbour, where the separation is genuinely ambiguous. Nearly
-all carry the `absent` flag. Consequently, they appear in the QA/QC table rather than passing
-silently. [`../METHODS.md`](../METHODS.md) section 7 explains the mechanism and the other known
-limitations, including a probable sample swap in one run's ground truth.
+1,174 detectable rows (2.8% of comparisons) are reported at 1% or less of the analyst's
+value. They are two different failures.
+
+- **Riders on a larger neighbour's leading edge.** The 1,099 rows below 10⁶ counts·s are many
+  but small: together they carry 0.4% of the analyst's detectable area. Four congeners (115,
+  88, 143 and 98) supply 417 of them. The separation there is genuinely ambiguous.
+- **Dominant peaks in concentrated samples.** The 75 rows above 10⁶ counts·s carry 3.7% of
+  the analyst's detectable area, down from 8.7% before the displaced-peak rule. The peak's
+  top moves off its retention-time anchor and the area goes to the wrong congener, while each
+  file's total area still agrees with the analyst's. The rule gives back the clear cases.
+  The ones it leaves are described in [`../METHODS.md`](../METHODS.md) section 7.2.
+
+Nearly all of them carry the `absent` flag. Consequently, they appear in the QA/QC table
+rather than passing silently. [`../METHODS.md`](../METHODS.md) section 7 explains both
+mechanisms and the other known limitations, including the one sample refused because its
+injection has no internal standard, and how analyst sheets are paired with data files.
+
+## Figures
+
+`tools/validation_figures.py` draws the validation figures from the pooled comparison, as SVG:
+agreement by integration method and flag, the area and total-mass scatters, Aroclor
+fingerprint agreement, detection agreement, and breakdowns of where and why the two
+integrations differ. Per-sample totals sum native congeners only, never the spiked labelled
+standards. The Aroclor figures need a congener-level reference table, given with `--aroclor`. The figures name run folders and plot per-sample results, so none is committed.
 
 ## Per-run reports
 
@@ -97,8 +153,10 @@ identifiers are not published.
 ```
 .venv\Scripts\python.exe tools\master_bench.py  --out docs\validation\master
 .venv\Scripts\python.exe tools\master_report.py --data docs\validation\master
+.venv\Scripts\python.exe tools\validation_figures.py --data docs\validation\master --aroclor <reference table>
 ```
 
 The first runs the pipeline over every run folder present and writes the pooled comparison.
-The second turns it into this report. The pooled CSVs are not committed. They are large,
-regenerable and keyed by sample.
+The second turns it into a full report, `docs/validation/MASTER-REPORT.md`, from which this
+page is taken. The third draws the figures into `docs/images/validation/`. None of the three
+outputs is committed. They are large, regenerable and keyed by sample.

@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from quant209.core.config import Analyte, analytes_by_transition, load_canonical_peaks
+from quant209.core.config import (
+    Analyte,
+    analytes_by_transition,
+    load_aroclor_abundance,
+    load_canonical_peaks,
+)
 from quant209.core.mzml import read_srm_mzml
 from quant209.core.standards import HOMOLOG_SURROGATE, internal_standard_label
 
@@ -121,3 +126,20 @@ def test_native_transition_keys_join_with_real_mzml_reader_keys(reference_run: P
 
     assert len(native_keys) == 10  # one MRM transition per homolog, mono..deca
     assert native_keys <= reader_keys
+
+
+def test_the_aroclor_abundance_table_covers_every_native_analyte():
+    """The displaced-peak rule looks up both neighbours. A native missing from the table
+    would silently count as zero, which the rule reads as "abundance unknown"."""
+    import math
+
+    abundance = load_aroclor_abundance()
+    natives = {a.label for a in load_canonical_peaks() if a.role == "native"}
+    assert natives <= set(abundance)
+    # Unknown is written nan, and only for a congener the reference did not measure apart.
+    assert {l for l, v in abundance.items() if math.isnan(v)} == {"102"}
+    assert all(0.0 <= v <= 1.0 for v in abundance.values() if not math.isnan(v))
+    # The pairs the rule was built for, as the published profiles have them.
+    assert abundance["110"] > 10 * abundance["115"]
+    assert abundance["129+138+163"] > 10 * abundance["160"]
+

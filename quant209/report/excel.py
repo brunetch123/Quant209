@@ -490,8 +490,11 @@ def _write_run_info_sheet(wb: Workbook, result: RunResult, run_name: str) -> Non
     ws.cell(row, 1, "IntegrationParams").font = _HEADER_FONT
     row += 1
     for field in fields(result.params):
+        value = getattr(result.params, field.name)
         ws.cell(row, 1, field.name)
-        ws.cell(row, 2, getattr(result.params, field.name))
+        # A cell holds one scalar. The label lists are written out as text, with an empty
+        # list (the rule switched off) still saying so.
+        ws.cell(row, 2, (", ".join(value) or "(none)") if isinstance(value, tuple) else value)
         row += 1
 
     row += 1

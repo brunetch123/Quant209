@@ -435,6 +435,10 @@ def test_run_info_sheet_carries_the_audit_trail(wb, mini_result: RunResult):
     assert "bracketed" in text.lower() or mini_result.reference_policy in text
     # IntegrationParams field values are visible somewhere.
     assert str(mini_result.params.rt_window) in text
+    # Including the two label lists, written out as text: a cell holds one scalar, and a
+    # report that cannot say which congeners were integrated by rule is not an audit trail.
+    assert ", ".join(mini_result.params.forced_riders) in text
+    assert ", ".join(mini_result.params.forced_present) in text
     # The skipped analyte for S2 is disclosed.
     assert "153" in text
     assert "S2" in text
