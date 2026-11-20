@@ -222,6 +222,7 @@ def fit_pair(
     first_rt: float,
     second_rt: float,
     max_drift: float,
+    window: tuple[int, int] | None = None,
 ) -> PairFit | None:
     """Split the envelope two co-eluting congeners merged into, or None.
 
@@ -232,14 +233,27 @@ def fit_pair(
     problem, solved on a grid of drift and width. A fit that does not reproduce the envelope
     (``MAX_RESIDUAL``), whose drift ran to the edge of what was allowed, or that leaves either
     congener under ``MIN_PAIR_SHARE`` of the envelope, says nothing about the split.
+
+    ``window`` restricts the fit to one envelope (sample indices ``start``, ``end``), measured
+    above its own baseline chord. Without it the fit spans 0.6 min either side of the pair.
     """
-    lo_t, hi_t = min(first_rt, second_rt) - 0.6, max(first_rt, second_rt) + 0.6
-    window = (times >= lo_t) & (times <= hi_t)
-    if window.sum() < 12:
-        return None
-    x = times[window]
-    y = signal[window].astype(float)
-    y = y - float(np.percentile(y, 5))
+    if window is None:
+        lo_t, hi_t = min(first_rt, second_rt) - 0.6, max(first_rt, second_rt) + 0.6
+        mask = (times >= lo_t) & (times <= hi_t)
+        if mask.sum() < 12:
+            return None
+        x = times[mask]
+        y = signal[mask].astype(float)
+        y = y - float(np.percentile(y, 5))
+    else:
+        # The envelope alone, samples ``start`` to ``end``, above the chord between them: a
+        # neighbouring peak inside the default window would otherwise defeat the fit.
+        start, end = window
+        if end - start < 12:
+            return None
+        x = times[start:end + 1]
+        y = signal[start:end + 1].astype(float)
+        y = y - np.interp(x, [x[0], x[-1]], [y[0], y[-1]])
     scale = max(float(np.linalg.norm(y)), 1.0)
     drifts = np.arange(-max_drift, max_drift + 1e-9, 0.005)
     best = None
@@ -269,3 +283,95 @@ def fit_pair(
         drift=drift,
         residual=residual,
     )
+
+
+#: Spacing a free pair fit may give two congeners (minutes). Closer than the first, two
+#: components of one width are one peak and the split between them means nothing. Farther
+#: than the second, the pair would have shown two apexes and not needed a fit.
+FREE_PAIR_SPACING = (0.015, 0.15)
+
+#: A free pair fit stands only if it reproduces the envelope this much better than one peak
+#: does (ratio of relative residuals). One peak is what a congener alone looks like, and two
+#: components of one width can always imitate it as two halves: that is not evidence of two.
+FREE_PAIR_GAIN = 0.5
+
+
+def _gauss_grid(x: np.ndarray, centres: np.ndarray, sigma: float) -> np.ndarray:
+    return np.exp(-0.5 * ((x[None, :] - centres[:, None]) / sigma) ** 2)
+
+
+def fit_unresolved_pair(
+    times: np.ndarray,
+    signal: np.ndarray,
+    first_rt: float,
+    second_rt: float,
+    start: int,
+    end: int,
+) -> PairFit | None:
+    """Split the envelope of two congeners the run's calibration could not resolve, or None.
+
+    Unlike :func:`fit_pair`, the two centres are free. The pair's spacing cannot be taken from
+    its anchors: the congener that had no apex in the calibration was anchored at a predicted
+    retention time, not a measured one. The fit covers the envelope itself, samples ``start``
+    to ``end`` above the chord between them, and each centre may lie anywhere inside it, the
+    earlier congener first, ``FREE_PAIR_SPACING`` apart, with one shared width. The
+    amplitudes are a linear least-squares problem, solved on the grid in closed form.
+
+    The fit stands only if it reproduces the envelope (``MAX_RESIDUAL``), clearly better than
+    one peak does (``FREE_PAIR_GAIN``), with neither centre at the edge of its range and each
+    congener holding at least ``MIN_PAIR_SHARE``. ``first`` is the component of the congener
+    at ``first_rt``, whichever elutes first.
+    """
+    if end - start < 12:
+        return None
+    x = times[start:end + 1]
+    y = signal[start:end + 1].astype(float)
+    y = y - np.interp(x, [x[0], x[-1]], [y[0], y[-1]])
+    lo_c, hi_c = float(x[0]), float(x[-1])
+    yy = float(y @ y)
+    if yy <= 0:
+        return None
+    scale = np.sqrt(yy)
+    centres = np.arange(lo_c, hi_c + 1e-9, 0.0025)
+    gaps = np.arange(FREE_PAIR_SPACING[0], FREE_PAIR_SPACING[1] + 1e-9, 0.0025)
+    best_one, best_two = np.inf, None
+    for sigma in np.arange(0.015, 0.1201, 0.0025):
+        g = _gauss_grid(x, centres, sigma)
+        gg = np.einsum("ij,ij->i", g, g)
+        gy = g @ y
+        # One peak: amplitude gy/gg, residual sum of squares yy - gy^2/gg.
+        one = np.sqrt(np.maximum(yy - gy ** 2 / gg, 0.0)) / scale
+        best_one = min(best_one, float(one[gy > 0].min(initial=np.inf)))
+        for gap in gaps:
+            k = int(round(gap / 0.0025))
+            if k >= centres.size:
+                break
+            g1, g2 = g[:-k], g[k:]
+            a11, a22 = gg[:-k], gg[k:]
+            a12 = np.einsum("ij,ij->i", g1, g2)
+            b1, b2 = gy[:-k], gy[k:]
+            det = a11 * a22 - a12 ** 2
+            ok = det > 1e-12 * a11 * a22
+            amp1 = np.where(ok, (a22 * b1 - a12 * b2) / np.where(ok, det, 1.0), -1.0)
+            amp2 = np.where(ok, (a11 * b2 - a12 * b1) / np.where(ok, det, 1.0), -1.0)
+            rss = yy - (amp1 * b1 + amp2 * b2)
+            rss = np.where((amp1 > 0) & (amp2 > 0), rss, np.inf)
+            j = int(np.argmin(rss))
+            if np.isfinite(rss[j]) and (best_two is None or rss[j] < best_two[0]):
+                best_two = (float(rss[j]), float(centres[j]), float(centres[j + k]), float(sigma),
+                            float(amp1[j]), float(amp2[j]))
+    if best_two is None:
+        return None
+    rss, c1, c2, sigma, h1, h2 = best_two
+    residual = float(np.sqrt(max(rss, 0.0))) / scale
+    if residual > MAX_RESIDUAL or residual > FREE_PAIR_GAIN * best_one:
+        return None
+    if c1 - lo_c < 0.0026 or hi_c - c2 < 0.0026:
+        return None  # a centre ran to the edge of its range: the fit was looking elsewhere
+    a1, a2 = h1 * sigma * SQRT_2PI * 60.0, h2 * sigma * SQRT_2PI * 60.0
+    if min(a1, a2) < MIN_PAIR_SHARE * (a1 + a2):
+        return None
+    earlier = RiderFit(area=a1, residual=residual, height=h1, centre=c1)
+    later = RiderFit(area=a2, residual=residual, height=h2, centre=c2)
+    first, second = (earlier, later) if first_rt <= second_rt else (later, earlier)
+    return PairFit(first=first, second=second, drift=0.0, residual=residual)

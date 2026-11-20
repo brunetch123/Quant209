@@ -201,6 +201,7 @@ table, so the same set is always spelled the same way:
 | `forced` | neither detection test found this analyte in this file, and a named rule integrated it anyway (section 2.7). **Every other peak is evidence read off the trace. This one is a rule applied to a label.** |
 | `displaced` | this analyte's peak drifted outside its own retention-time territory into a minor neighbour's, and was given back to it on the strength of published Aroclor profiles (section 2.8). The peak is measured from the trace. Which congener it belongs to is the judgement to check. |
 | `apportioned` | this analyte and a neighbour of comparable abundance had merged into one envelope, and its area is its share by a two-peak fit (section 2.8). Both members of the pair carry the flag. |
+| `unresolved` | this run's calibration did not separate this analyte from its neighbour, and in this file the two shared one envelope; its area is its component of a two-peak fit at the spacing the calibration measured (section 2.9). Both members of the pair carry the flag. |
 | `realigned` | this analyte was searched at a retention time moved by a shift measured on this file's own labelled standards (section 3.3). The peak is read off the trace. Only where to look was corrected. |
 
 ### 2.6 Riders: the shoulder test and shape fitting
@@ -378,6 +379,46 @@ profiles' assignment, so it reports 115 as absent there. The 110/115 pair still 
 absolute mass error, most of it from those files. Section 7.2 covers the concentrated-sample
 errors the rule does not reach.
 
+### 2.9 Pairs the run's calibration does not resolve
+
+Implemented in `unresolved_pairs` and `integrate_transition` (`quant209/core/integrate.py`),
+`fit_unresolved_pair` (`quant209/core/deconvolve.py`) and `run_analysis`
+(`quant209/core/pipeline.py`).
+
+**The problem.** A few neighbouring congeners sit only 0.02 to 0.06 min apart in the canonical
+table: 110/115, 45/51, 102/98, 134/143, 83/99 and 88/91. Most runs resolve them. Some columns
+do not, and there the calibration injection shows one envelope where the standard holds two
+congeners at comparable amounts. The congener without an apex of its own failed the presence
+test, its whole envelope went to its neighbour, and it got no response factor: no mass in
+any file of the run. In the validation dataset this took PCB 45 out of 30 runs, 83 out of 8,
+51 out of 7 and 91 out of 5. It also inflated the neighbour's response factor, which was
+built on both congeners' area.
+
+**The rule.** The calibration standard holds every congener, so in its injection an analyte
+with no apex, whose anchor lies inside a neighbour's integrated peak and within the apex
+search window of its apex, is not absent: it eluted with that neighbour. Each usable
+calibration is integrated once to find such pairs. The absent congener's anchor was only a
+prediction, so the envelope is fitted as two Gaussian components with free positions and one
+shared width, over the envelope alone and above its own baseline chord. Where the fit
+reproduces the envelope (`MAX_RESIDUAL`) and each congener holds at least `MIN_PAIR_SHARE`,
+the two fitted retention times become both congeners' anchors for that calibration.
+
+In every file of the run, the calibration included, an unresolved pair that shows one envelope
+is then split by the rigid pair fit of section 2.8 at that measured spacing, with one common
+drift, over the envelope alone, and both members carry the **`unresolved`** flag. A congener
+alone in a sample fits as one component and nothing, which the fit refuses, so a single peak
+is never split. As for a comparable pair, the absent congener is not offered to the shoulder
+test: a skim models a rider on a parent, not two congeners the calibration showed eluting
+together, and on the case it was built on the skim gave the rider barely a quarter of its
+area. A pair the calibration resolves, and a run without such pairs, integrate exactly as
+before.
+
+**What it changes.** On the four failing calibrations examined, the fit gives PCB 45 0.43,
+0.46, 0.44 and 0.45 of the 45+51 envelope, against the analysts' 0.41, 0.46, 0.48 and 0.42, at
+a fitted spacing of 0.073 to 0.085 min (the runs that resolve the pair show 0.074). On the
+first of them, PCB 45's response factor comes out at 3.32 against the analyst's 3.27, where it
+had none, and PCB 51's at 2.17 against 2.41, where it had 1.64.
+
 ---
 
 ## 3. Per-run retention-time alignment and the run-fit guard
@@ -412,6 +453,23 @@ Three constraints bound the fit:
   On the run the canonical table was extracted from, the fitted maps displace by at most
   0.008 min, which is apex noise, not a method difference. Declaring identity there keeps a
   same-method run's anchors exactly what they would be without alignment.
+
+**A near tie is settled by the standard's composition.** In a crowded channel, a line shifted by
+one peak across part of the channel puts each congener beside its neighbour's peak and matches
+about as many peaks as the right one. On one re-run, two of three calibrations chose such a
+line in the hexa channel by a single match (29 against 28), and the run's cross-calibration
+reconciliation then "repaired" the third, correct one to agree with them. Every hexa congener
+from 164 to 158 took its neighbour's peak, and PCB 141's response factor came out 34 times too
+large. An analyst rejects that at a glance: the 129+138+163 group holds three congeners and
+must be the big peak. So among lines within `SIZE_COUNT_SLACK` = 2 matches of the best, one whose
+matched peaks agree with the standard's composition (correlation of log certified mass with
+log peak height) by at least `SIZE_CORR_MARGIN` = 0.3 more is taken instead. There the right
+line scored +0.36 and the shifted one -0.11. The tie must be one between near neighbours: the
+alternative may move no position by more than `CONSENSUS_TOL` = 1.0 min from the best line's,
+and the composition is read only where at least `SIZE_MIN_MATCHED` = 12 congeners match. On
+the eleven-congener di and octa channels a correlation over a handful of masses is noise, and
+without these bounds it once preferred a line that re-timed the octa channel by 8.5 min and
+lost the internal standard on it.
 
 ### 3.2 The run-fit guard
 
@@ -651,7 +709,7 @@ explaining why.
 
 The laboratory's archive is the test set. Every analysis run whose analyst workbook can be read
 is scored against that analyst's own manual integration and quantification. The comparison
-spans 49 runs and 41,240 detectable peak comparisons, across four years, several analysts and
+spans 49 runs and 41,376 detectable peak comparisons, across four years, several analysts and
 two instruments.
 
 The comparison runs through the production entry point (`core.pipeline.run_analysis`) with
@@ -712,37 +770,39 @@ scored value is consulted.
 
 | | rows | median &#124;RPD&#124; | within ±25% | total ratio |
 |---|---|---|---|---|
-| Peak areas | 41,240 | **2.04%** | **88.8%** | 1.004 |
-| Congener masses | 30,622 | **4.24%** | **84.1%** | 1.017 |
-| Surrogate recoveries | 6,591 | 0.021 mean absolute error | | |
+| Peak areas | 41,376 | **1.99%** | **89.8%** | 1.008 |
+| Congener masses | 30,712 | **4.14%** | **85.5%** | 1.015 |
+| Surrogate recoveries | 6,711 | 0.021 mean absolute error | | |
 
 Areas and masses both clear both gates. Mass agreement still trails area agreement, for the
 reason given in section 7.5.
 
-**Since version 1.0** (2.13% and 87.1% for areas, 4.61% and 78.7% for masses, on the same
-rows), every change comes from the named rules of section 2.7, the displaced-peak rule of
-section 2.8, reading diluted injections as dilutions (section 7.3), excluding a calibration
-injection that does not fit (section 3.2), searching a shifted file where its standards went
-(section 3.3), scoring every analyst sheet against the file it came from, and putting the
-analyst's group masses on one basis (both section 6.1). The area median barely moves, because
-these act on few rows. What moves is the large error: total absolute mass error on detectable
-rows fell from 3,214k ng in version 1.0 to 3,004k with the named rules, and to 1,565k now. No
-sample's native total differs from the analyst's by 2× or more, except two trace-level samples
-where the difference is a few nanograms, and only 11 of 477 by 25% or more, seven of them
-under 11 ng. The total ratios went from 0.975 to 1.004 for areas and from 0.991 to 1.017 for
-masses.
+**Since version 1.0** (2.13% and 87.1% for areas, 4.61% and 78.7% for masses), every change
+comes from the named rules of section 2.7, the displaced-peak rule of section 2.8, reading
+diluted injections as dilutions (section 7.3), excluding a calibration injection that does not
+fit (section 3.2), searching a shifted file where its standards went (section 3.3), scoring
+every analyst sheet against the file it came from, and putting the analyst's group masses on
+one basis (both section 6.1), and, in version 1.3, splitting the pairs a run's calibration does
+not resolve (section 2.9) and settling near ties in the retention-time alignment by the
+standard's composition (section 3.1). The area median barely moves, because these act on few
+rows. What moves is the large error: total absolute mass error on detectable rows fell from
+3,214k ng in version 1.0 to 3,004k with the named rules, to 1,565k in version 1.2 and to 1,474k
+now. No sample's native total differs from the analyst's by 2× or more, except two trace-level
+samples where the difference is a few nanograms, and only 11 of 480 by 25% or more, seven of
+them under 11 ng. The total ratios went from 0.975 to 1.008 for areas and from 0.991 to 1.015
+for masses.
 
 No run in the archive disagrees by more than 7.4% at the median. The best sits at 0.67%.
 Agreement tracks signal:
 
 | manual area (counts·s) | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| > 10⁶ | 2,391 | 0.6% | 92.3% |
-| 10⁵ – 10⁶ | 6,316 | 1.0% | 93.4% |
-| 10⁴ – 10⁵ | 13,017 | 1.7% | 91.1% |
-| 10³ – 10⁴ | 19,516 | 3.2% | 85.3% |
-| 10² – 10³ | 25,752 | 12.1% | 67.4% |
-| < 10² | 51,333 | 108% | 17.9% |
+| > 10⁶ | 2,394 | 0.6% | 93.9% |
+| 10⁵ – 10⁶ | 6,321 | 0.9% | 95.0% |
+| 10⁴ – 10⁵ | 13,076 | 1.6% | 92.3% |
+| 10³ – 10⁴ | 19,585 | 3.1% | 86.1% |
+| 10² – 10³ | 25,903 | 11.8% | 68.1% |
+| < 10² | 52,084 | 108% | 18.0% |
 
 The last two bands sit below the reporting threshold and are shown for completeness. By
 homolog, area agreement runs from 1.1% (mono) to 5.0% (nona). Penta is the weakest of the
@@ -768,8 +828,8 @@ Four congeners supply 417 of the small rows: **115, 88, 143 and 98**. Each elute
 *leading* edge of a much larger neighbour. The trace climbs monotonically through them, so
 they produce no local maximum and no valley. The presence test rejects them, and either the
 shoulder test finds too little curvature or the shape fit of section 2.6 cannot justify its
-result. Where the fit does succeed, it works about as well as a fit can here: 2,610
-detectable rows are resolved that way, at 17.4% median |RPD| with 61% inside the band. On
+result. Where the fit does succeed, it works about as well as a fit can here: 3,007
+detectable rows are resolved that way, at 16.3% median |RPD| with 63% inside the band. On
 these four, however, the separation is genuinely ill-posed: two overlapping peaks can trade
 amplitude and reproduce the observed envelope equally well.
 
@@ -845,7 +905,7 @@ that injection excluded, octa recoveries agree to 0.023, in line with the other 
 
 ### 7.5 Mass agreement trails area agreement
 
-84.1% of masses fall within ±25% against 88.8% of areas. A mass is a response factor times
+85.5% of masses fall within ±25% against 89.8% of areas. A mass is a response factor times
 an area times an internal-standard ratio, so it inherits the area disagreement and adds the
 uncertainty of two further measurements. The gap is expected in kind. Its size is worth
 attention.

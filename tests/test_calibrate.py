@@ -508,3 +508,38 @@ def test_warp_interpolates_and_extends_at_its_own_slope():
     assert warp_rt(pairs, 10.0) == pytest.approx(10.0 - 1.2 * 10.0)  # first segment slope 1.2
     assert warp_rt(pairs, 70.0) == pytest.approx(58.0 + 1.2 * 10.0)  # last segment slope 1.2
     assert warp_rt([], 33.3) == 33.3
+
+
+def test_a_line_shifted_by_one_peak_loses_to_the_composition_of_the_standard():
+    """A crowded channel can be matched one peak off and score a match more.
+
+    Sixteen congeners half a minute apart, four of them co-elution groups three times as
+    heavy, so three times the peak. The first congener's peak is missing (unresolved) and an
+    unrelated peak follows the last. The line shifted by one position puts all sixteen on
+    peaks; the right line, fifteen. Only the standard's composition says which is right: the
+    big groups on the big peaks.
+    """
+    from quant209.core.calibrate import _fit_line
+
+    canonical = 10.0 + 0.5 * np.arange(16)
+    weights = np.ones(16)
+    weights[[2, 6, 10, 13]] = 3.0
+    observed = 10.5 + 0.5 * np.arange(16)  # congener k at 10 + 0.5k; 10.0 missing, 18.0 extra
+    heights = np.array([weights[int(round((t - 10.0) / 0.5))] * 1000.0 if t < 18.0 else 1000.0
+                        for t in observed])
+
+    a, b, n = _fit_line(canonical, observed, 0.1)
+    assert abs(b - 0.5) < 0.05 and n == 16, "matches alone pick the shifted line"
+    a, b, n = _fit_line(canonical, observed, 0.1, weights=weights, heights=heights)
+    assert abs(a - 1.0) < 0.01 and abs(b) < 0.05 and n == 15, "the composition picks the right one"
+
+
+def test_the_composition_does_not_overrule_a_small_channel():
+    """Eight congeners are too few for a correlation of their masses to mean anything."""
+    from quant209.core.calibrate import _fit_line
+
+    canonical = np.arange(8, dtype=float) + 10.0
+    weights = np.array([1.0, 1.0, 3.0, 1.0, 1.0, 1.0, 3.0, 1.0])
+    observed = np.arange(11.0, 19.0)
+    heights = np.array([weights[int(t - 10)] * 1000.0 if t < 18 else 1000.0 for t in observed])
+    assert _fit_line(canonical, observed, 0.1, weights=weights, heights=heights) ==         _fit_line(canonical, observed, 0.1)

@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.3.0 (2026-11-20)
+
+### Integration
+
+- **Pairs the run's calibration does not resolve are split.** A few neighbouring congeners
+  that most columns separate (45/51, 83/99 and 88/91 in the archive) elute as one envelope on
+  some. The calibration injection then gave one of them the whole envelope and the other no
+  response factor, so no mass in any file of the run. Each calibration now measures both
+  congeners' retention times by a two-peak fit with free positions, and every file splits such
+  a pair's shared envelope by a two-peak fit at that spacing. A single peak is never split.
+  Both members carry the new `unresolved` flag. See [`docs/METHODS.md`](docs/METHODS.md)
+  section 2.9. On the 58 benchmark runs, PCB 45 within ±25% of the analyst rises from 15% to
+  50% of rows and PCB 51 from 13% to 28%.
+
+### Retention-time alignment
+
+- **A near tie is settled by the standard's composition.** In a crowded channel a line
+  shifted by one peak can match as many peaks as the right one. Two of one re-run's three
+  calibrations chose such a line, and reconciliation then moved the third to agree, so a whole
+  window of congeners took their neighbours' peaks. Among lines within two matches of the best,
+  one whose matched peak heights agree clearly better with the standard's certified masses is
+  now taken, provided it moves no position by more than 1 min and at least 12 congeners match
+  (section 3.1). With both changes, on the 58 benchmark runs, rows within ±25% of the analyst
+  rise from 84.1% to 85.5% and absolute mass error falls by 6% (1,565k to 1,474k ng); three
+  runs improve by 10k to 58k ng and none gets worse; 129+138+163 within ±25% rises from 81% to
+  91%.
+
+### Documentation
+
+- The README and [`docs/METHODS.md`](docs/METHODS.md) section 6 report this version's
+  validation figures: peak areas 1.99% median |RPD| and 89.8% within ±25%, congener masses
+  4.14% and 85.5%, surrogate recoveries 0.021 mean absolute error.
+
 ## 1.2.0 (2026-11-16)
 
 ### Integration

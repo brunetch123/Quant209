@@ -108,7 +108,8 @@ from .calibrate import (
     rt_fit_quality,
 )
 from .config import Analyte, load_canonical_peaks
-from .integrate import integrate_run
+from .deconvolve import fit_unresolved_pair
+from .integrate import integrate_run, unresolved_pairs
 from .mzml import get_transition, read_srm_mzml
 from .peaks import IntegrationParams, PeakResult, local_maxima, smooth
 from .qaqc import QaqcParams, censor_below_loq, compute_loq, sample_flags
@@ -327,6 +328,11 @@ class RunResult:
     #: fit check's reason. They anchor no other file and contribute no response factor (see
     #: :func:`select_calibrations`). Empty when every injection fits, or when none does.
     excluded_calibrations: dict[str, str] = field(default_factory=dict)
+    #: Neighbouring congeners this run's calibration injections could not separate, as
+    #: ``(earlier, later)`` label pairs (see :func:`core.integrate.unresolved_pairs`). Wherever
+    #: such a pair shares one envelope it is split by a two-peak fit, in every file. Empty when
+    #: the calibration resolves every pair.
+    unresolved_pairs: tuple[tuple[str, str], ...] = ()
 
     @property
     def skipped_analytes(self) -> dict[str, list[str]]:
@@ -618,7 +624,8 @@ def _bool_frame(
 
 
 def _integrate_one(
-    record: FileRecord, analytes: list[Analyte], anchors: dict[str, float], params: IntegrationParams
+    record: FileRecord, analytes: list[Analyte], anchors: dict[str, float], params: IntegrationParams,
+    unresolved: frozenset[tuple[str, str]] = frozenset(),
 ) -> None:
     """Read, integrate and release one file's chromatograms, filling ``record`` in place.
 
@@ -640,7 +647,7 @@ def _integrate_one(
             return
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            record.peaks = integrate_run(chroms, analytes, anchors, params)
+            record.peaks = integrate_run(chroms, analytes, anchors, params, unresolved=unresolved)
         record.is_window_max = _standard_window_max(chroms, analytes, anchors, params)
     finally:
         del chroms
@@ -787,6 +794,7 @@ def typical_heights(
 def realign_shifted_file(
     record: "FileRecord", analytes: list[Analyte], anchors: dict[str, float],
     params: IntegrationParams, typical: Mapping[str, float], landmarks: set[str],
+    unresolved: frozenset[tuple[str, str]] = frozenset(),
 ) -> str | None:
     """Re-integrate a file whose labelled standards moved together, where they went.
 
@@ -814,12 +822,14 @@ def realign_shifted_file(
         return None
     chroms = read_srm_mzml(record.mzml)
     try:
-        return _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost)
+        return _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost,
+                             unresolved)
     finally:
         del chroms
 
 
-def _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost):
+def _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost,
+                  unresolved=frozenset()):
     by_label = {p.label: p for p in record.peaks}
     analyte_by = {a.label: a for a in analytes}
     found: dict[str, float] = {}
@@ -849,7 +859,7 @@ def _realign_with(chroms, record, analytes, anchors, params, typical, landmarks,
     moved = {label: rt + shift if lo <= rt <= hi else rt for label, rt in anchors.items()}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        peaks = integrate_run(chroms, analytes, moved, params)
+        peaks = integrate_run(chroms, analytes, moved, params, unresolved=unresolved)
     after = {p.label: p for p in peaks}
     if not all(label in after and after[label].detected for label in found):
         return None
@@ -1035,6 +1045,57 @@ def run_analysis(
     ]
     notes.extend(anchor_repairs)
 
+    # Congeners this run's chromatography does not separate. Each usable calibration is
+    # integrated once at its own anchors: the standard holds every congener, so one there with
+    # no apex of its own, inside a neighbour's peak, eluted with that neighbour (see
+    # :func:`core.integrate.unresolved_pairs`). Its anchor was only a prediction, so the
+    # envelope is fitted as two components with free positions
+    # (:func:`core.deconvolve.fit_unresolved_pair`), and the two fitted retention times become
+    # both congeners' anchors for that calibration. Every file, the calibration included, then
+    # splits the pair's shared envelope at that measured spacing, so the response factor and
+    # the masses it scales are measured alike. A pair whose envelope the fit cannot describe
+    # is left as before.
+    by_name = {e.name: e for e in cal_entries}
+    found: set[tuple[str, str]] = set()
+    transition_of = {a.label: (a.q1, a.q3) for a in analytes}
+    for name in list(anchors_by_cal):
+        cal_anchors = anchors_by_cal[name]
+        cal_path = _mzml_path(by_name[name], converted_dir) if name in by_name else None
+        if cal_path is None or not cal_path.exists():
+            continue
+        chroms = read_srm_mzml(cal_path)
+        try:
+            if not any(c.times.size > 1 for c in chroms.values()):
+                continue
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                first_pass = {p.label: p for p in integrate_run(chroms, analytes, cal_anchors, params)}
+            measured = dict(cal_anchors)
+            for one, two in sorted(unresolved_pairs(list(first_pass.values()), analytes, cal_anchors, params)):
+                kept = first_pass[one] if first_pass[one].detected else first_pass[two]
+                chrom = get_transition(chroms, *transition_of[one])
+                if chrom is None:
+                    continue
+                pair_fit = fit_unresolved_pair(
+                    chrom.times, chrom.intensities, cal_anchors[one], cal_anchors[two],
+                    kept.i_start, kept.i_end,
+                )
+                if pair_fit is None:
+                    continue
+                measured[one], measured[two] = pair_fit.first.centre, pair_fit.second.centre
+                found.add((one, two))
+            anchors_by_cal[name] = measured
+        finally:
+            del chroms
+    anchors = anchors_by_cal.get(primary_cal, anchors)
+    unresolved = frozenset(found)
+    notes.extend(
+        f"congeners {one} and {two} are not resolved in this run's calibration: their retention "
+        "times were measured by a two-peak fit there, and wherever they share one envelope it is "
+        "split between them at that spacing (flag 'unresolved')"
+        for one, two in sorted(unresolved)
+    )
+
     # ---- 2) Integrate every quantified file, one at a time ------------------------------
     quantified = [e for e in entries if e.file_type in QUANTIFIED_TYPES]
     records: dict[str, FileRecord] = {}
@@ -1063,7 +1124,7 @@ def run_analysis(
         paired = calibration_for.get(entry.name, "")
         file_anchors = anchors_by_cal.get(paired) or own_anchors.get(paired) or anchors
         anchors_for_file[file_id] = file_anchors
-        _integrate_one(record, analytes, file_anchors, params)
+        _integrate_one(record, analytes, file_anchors, params, unresolved)
         if not record.usable:
             notes.append(
                 f"{entry.name}: decoded to no chromatograms (truncated or missing "
@@ -1083,7 +1144,8 @@ def run_analysis(
     for fid in sample_ids + blank_ids:
         if records[fid].usable:
             note = realign_shifted_file(
-                records[fid], analytes, anchors_for_file[fid], params, typical, landmarks
+                records[fid], analytes, anchors_for_file[fid], params, typical, landmarks,
+                unresolved,
             )
             if note:
                 notes.append(note)
@@ -1263,5 +1325,6 @@ def run_analysis(
         reference_policy=reference,
         reference_for=reference_for,
         calibration_for=calibration_for,
+        unresolved_pairs=tuple(sorted(unresolved)),
         excluded_calibrations=excluded_cals,
     )

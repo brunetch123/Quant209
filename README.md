@@ -131,31 +131,34 @@ failure and 2 on a usage error.
 
 ## Validation
 
-Quant 209 has been compared against manual integrations across 49 analysis runs and 41,240
+Quant 209 has been compared against manual integrations across 49 analysis runs and 41,376
 peak comparisons, spanning four years, several analysts and two instruments. The laboratory
 archive holds 64 run folders in total. [`docs/validation/`](docs/validation/) accounts for the
 fifteen that are not scored.
 
 | | median relative difference | within ±25% |
 |---|---|---|
-| Peak areas | 2.0% | 88.8% |
-| Congener masses | 4.2% | 84.1% |
-| Surrogate recoveries | 0.030 mean absolute error | |
+| Peak areas | 2.0% | 89.8% |
+| Congener masses | 4.1% | 85.5% |
+| Surrogate recoveries | 0.021 mean absolute error | |
 
 No run in the archive disagrees by more than 7.4% at the median. Agreement is best on large,
-well-resolved peaks, with a median of 0.7% above 10⁶ counts·s. It degrades near the detection
+well-resolved peaks, with a median of 0.6% above 10⁶ counts·s. It degrades near the detection
 limit, where manual integration is also imprecise and results are censored.
 
 [`docs/validation/`](docs/validation/) holds the full comparison.
 [`docs/METHODS.md`](docs/METHODS.md) describes every rule the pipeline applies and states its
 known limitations. Four congeners are integrated by named rules where the trace alone does not
 find them, and each such peak carries the `forced` flag (METHODS section 2.7). In a
-concentrated sample, a dominant peak that drifts into a minor neighbour's retention-time
-window is given back to it on the strength of published Aroclor profiles, and carries the
-`displaced` flag. Two comparable congeners merged into one envelope are split by a two-peak
-fit and carry the `apportioned` flag (section 2.8). A file whose labelled standards show part
-of its chromatogram moved is searched where they went, flagged `realigned` (section 3.3). A
-file without a usable internal standard gets an error and no mass (section 4.2).
+concentrated sample, a dominant peak that drifts into a minor neighbour's retention-time window
+is given back to it on the strength of published Aroclor profiles, and carries the `displaced`
+flag. Two comparable congeners merged into one envelope are split by a two-peak fit and carry
+the `apportioned` flag (section 2.8). Two neighbouring congeners a run's calibration does not
+separate have their retention times measured there by a two-peak fit, and wherever they share
+one envelope it is split at that spacing, flagged `unresolved` (section 2.9). A file whose
+labelled standards show part of its chromatogram moved is searched where they went, flagged
+`realigned` (section 3.3). A file without a usable internal standard gets an error and no mass
+(section 4.2).
 
 ## Layout
 

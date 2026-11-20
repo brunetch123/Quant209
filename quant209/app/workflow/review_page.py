@@ -192,6 +192,7 @@ FLAG_TONES: dict[str, str] = {
     "forced": "info",
     "displaced": "info",
     "apportioned": "info",
+    "unresolved": "info",
     "realigned": "info",
     "censored": "neutral",
     "recovery": "error",
@@ -201,7 +202,7 @@ FLAG_TONES: dict[str, str] = {
 #: The QA/QC tab's filter chips, in order. ``All`` is not a kind. It clears the others.
 FLAG_KINDS: tuple[str, ...] = (
     "recovery", "missing_is", "absent", "low_sn", "narrow", "clustered", "shoulder", "forced", "displaced",
-    "apportioned", "realigned", "censored",
+    "apportioned", "unresolved", "realigned", "censored",
 )
 
 #: How a flag kind is *written* on screen. The stored kind is unchanged: it is what the CSV
@@ -2398,6 +2399,8 @@ def _flag_context(flag: str, peak) -> str:
         return "searched at a retention time corrected for a shift in this file's labelled standards"
     if flag == "apportioned":
         return "merged with a neighbour of comparable abundance; area is its share by a two-peak fit"
+    if flag == "unresolved":
+        return "not separated from a neighbour in this run's calibration; area is its share of their peak by a two-peak fit"
     return ""
 
 

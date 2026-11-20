@@ -102,8 +102,14 @@ KNOWN_METHODS = frozenset({"valley_drop", "rt_window", "tangent_skim", "deconvol
 #: ``apportioned``: this analyte and a neighbour of comparable abundance had merged into one
 #:     envelope, and its area is its share by a rigid two-peak fit (see
 #:     :func:`_reclaim_displaced`). Both members of the pair carry the flag.
+#: ``unresolved``: this run's calibration injection could not separate this analyte from its
+#:     neighbour (see :func:`unresolved_pairs`), and in this file the two share one envelope.
+#:     Its area is its component of a two-peak fit at the spacing the calibration measured
+#:     between them (``core.deconvolve.fit_pair``), and its record spans the envelope. Both
+#:     members of the pair carry the flag.
 KNOWN_FLAGS = frozenset(
-    {"absent", "low_sn", "narrow", "clustered", "shoulder", "forced", "displaced", "apportioned"}
+    {"absent", "low_sn", "narrow", "clustered", "shoulder", "forced", "displaced", "apportioned",
+     "unresolved"}
 )
 
 #: A congener must reach this weight fraction in at least one common Aroclor before a peak
@@ -468,12 +474,18 @@ def integrate_transition(
     params: IntegrationParams,
     src_q1: float = -1.0,
     src_q3: float = -1.0,
+    unresolved: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[PeakResult]:
     """Integrate every analyte that shares one transition trace.
 
     ``src_q1``/``src_q3`` identify the acquired transition these arrays came from and are
     recorded on each ``PeakResult`` so a re-plot can find the trace again. The canonical
     transition on the analyte may not be a reader key. See ``core.mzml.get_transition``.
+
+    ``unresolved`` holds the label pairs this run's calibration injection could not separate
+    (:func:`unresolved_pairs`). Where only one of such a pair has a peak in this file, the
+    envelope is fitted as two components and each takes its own (flag ``unresolved``), unless
+    one peak explains it as well. Empty, the default, changes nothing.
 
     ``times``/``intensities`` are never written to. The same trace is integrated once per
     analyte sharing the transition, so any in-place edit would corrupt its neighbours.
@@ -523,6 +535,37 @@ def integrate_transition(
         times, detect, integ, ordered, expected, bounds, apexes, present, params
     )
     partners = {j: i for i, (j, _) in shared.items()}
+
+    #    2a') A pair this run's calibration could not resolve (``unresolved``). Where only one of
+    #    the two has a peak in this file, that peak is an envelope the two may share. It is
+    #    fitted as the two congeners at the spacing the calibration measured between them
+    #    (their anchors, from ``core.deconvolve.fit_unresolved_pair`` on the calibration), with
+    #    one common drift (``core.deconvolve.fit_pair``), and each takes its own component, as
+    #    a comparable pair does. A congener alone fits as one component and nothing, which the
+    #    fit refuses (``MIN_PAIR_SHARE``), so a single peak is never split. Like a comparable
+    #    pair, the absent one is then not offered to the shoulder test: a skim models a rider
+    #    on a parent, not two congeners the calibration showed eluting together.
+    unresolved_members: set[int] = set()
+    if unresolved:
+        index = {a.label: k for k, a in enumerate(ordered)}
+        taken = set(shared) | set(partners) | set(reclaimed) | set(reclaimed.values())
+        for one, two in sorted(unresolved):
+            if one not in index or two not in index or abs(index[one] - index[two]) != 1:
+                continue
+            for i, j in ((index[one], index[two]), (index[two], index[one])):
+                if present[i] or not present[j] or {i, j} & (taken | unresolved_members):
+                    continue
+                # The envelope is the present one's peak, bounded as it would be without the rule.
+                j_start, j_end, _ = _resolve_boundaries(detect, bounds, apexes, present, j, halfwidth)
+                pair = fit_pair(times, integ, expected[i], expected[j], params.max_reach,
+                                window=(j_start, j_end))
+                if pair is None:
+                    continue
+                shared[i] = (j, pair)
+                partners[j] = i
+                unresolved_members |= {i, j}
+                break
+
 
     #    2b) Shoulder rescue. An analyte eluting on the flank of a much larger neighbour has
     #    no local maximum of its own, so its prominence is ~0 and the test above rejects it.
@@ -623,6 +666,7 @@ def integrate_transition(
         resolved[j] = (j_start, j_end, j_method)
     spans = _cluster_spans(detect, resolved, apexes, present, params.overlap_frac)
 
+
     results: list[PeakResult] = []
     for i, analyte in enumerate(ordered):
         if i in shoulders:
@@ -707,8 +751,10 @@ def integrate_transition(
             flags.append("forced")
         if i in reclaimed:
             flags.append("displaced")
-        if i in shared or i in partners:
+        if (i in shared or i in partners) and i not in unresolved_members:
             flags.append("apportioned")
+        if i in unresolved_members:
+            flags.append("unresolved")
         results.append(
             PeakResult(
                 label=analyte.label,
@@ -739,8 +785,12 @@ def integrate_run(
     analytes: list[Analyte],
     anchors: dict[str, float],
     params: IntegrationParams | None = None,
+    unresolved: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[PeakResult]:
     """Integrate every analyte in one data file against a per-run RT anchor table.
+
+    ``unresolved``: the label pairs this run's calibration could not separate
+    (:func:`unresolved_pairs`), passed to every transition (see :func:`integrate_transition`).
 
     ``chroms`` is a reader dict as returned by :func:`core.mzml.read_srm_mzml`. ``anchors``
     maps analyte label -> anchor RT (minutes), normally from :func:`core.calibrate.build_anchors`.
@@ -777,7 +827,7 @@ def integrate_run(
         results.extend(
             integrate_transition(
                 chrom.times, chrom.intensities, transition_analytes, anchors, params,
-                src_q1=chrom.q1, src_q3=chrom.q3,
+                src_q1=chrom.q1, src_q3=chrom.q3, unresolved=unresolved,
             )
         )
 
@@ -792,3 +842,42 @@ def integrate_run(
             stacklevel=2,
         )
     return results
+
+
+def unresolved_pairs(
+    cal_peaks: list[PeakResult],
+    analytes: list[Analyte],
+    anchors: dict[str, float],
+    params: IntegrationParams | None = None,
+) -> frozenset[tuple[str, str]]:
+    """Neighbouring congeners this run's calibration injection could not separate.
+
+    The calibration standard holds every congener, so in its injection an analyte with no
+    apex of its own is not absent: it is inside a neighbour's peak. Where its anchor lies
+    within that neighbour's integrated peak, and within the apex search window of the
+    neighbour's apex, the two eluted as one envelope, and the chromatography of this run does
+    not resolve them. Integrated as it stands, the whole envelope goes to one of the pair and
+    the other gets nothing: no response factor, and so no mass in any file of the run.
+
+    ``cal_peaks`` is the calibration file integrated at its own ``anchors`` with no pairs
+    given. Returns ``(earlier, later)`` label pairs by anchor, for :func:`integrate_run`.
+    A run whose calibration resolves every pair returns an empty set and integrates exactly
+    as before.
+    """
+    params = params or IntegrationParams()
+    by_label = {p.label: p for p in cal_peaks}
+    pairs: set[tuple[str, str]] = set()
+    for _transition, group in analytes_by_transition(analytes).items():
+        ordered = sorted(
+            (a for a in group if a.role == "native" and a.label in by_label and a.label in anchors),
+            key=lambda a: anchors[a.label],
+        )
+        for first, second in zip(ordered, ordered[1:]):
+            for lost, kept in ((first, second), (second, first)):
+                p_lost, p_kept = by_label[lost.label], by_label[kept.label]
+                if p_lost.detected or not p_kept.detected or "absent" not in p_lost.flags:
+                    continue
+                at = anchors[lost.label]
+                if p_kept.rt_start < at < p_kept.rt_end and abs(at - p_kept.rt_apex) <= params.rt_window:
+                    pairs.add((first.label, second.label))
+    return frozenset(pairs)

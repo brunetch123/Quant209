@@ -315,6 +315,50 @@ def _detect_apexes(
 # --------------------------------------------------------------------------------------
 
 
+#: How many fewer matched peaks a candidate line may explain than the best and still be
+#: preferred for agreeing better with the calibration standard's composition (see
+#: :func:`_fit_line`). In a crowded channel a line shifted by one peak across part of the
+#: channel puts each congener beside its neighbour's peak and matches about as many, and on
+#: one run's second calibration two more than the right line (31 against 28 after
+#: refinement), which a slack of one let stand.
+SIZE_COUNT_SLACK = 2
+
+#: How much better (correlation of log certified mass with log peak height over the matched
+#: congeners) a candidate must agree with the standard's composition to displace the
+#: best-matching line. Measured on a re-run whose hexa channel two of three calibrations
+#: identified one peak off: the right line scored +0.36 and +0.37, the shifted one -0.11 and
+#: -0.02, while the shifted one matched one peak more.
+SIZE_CORR_MARGIN = 0.3
+
+#: Fewest matched congeners for the composition to be read at all. On the small channels (the
+#: di and octa channels carry 11) a correlation over a handful of masses that hardly differ is
+#: noise: there it once preferred a line that re-timed the octa channel by 8.5 min and lost the
+#: internal standard on it.
+SIZE_MIN_MATCHED = 12
+
+
+def _size_agreement(
+    a: float, b: float, canonical: np.ndarray, observed: np.ndarray, tol: float,
+    weights: np.ndarray, heights: np.ndarray,
+) -> float:
+    """Correlation of log certified mass with log matched-peak height under one line.
+
+    A calibration standard holds known amounts: a co-elution group of three congeners makes a
+    peak about three times its neighbours'. A correct identification puts the big groups on
+    the big peaks. One shifted by a peak scrambles that. ``nan`` where too few congeners match
+    or their masses hardly differ.
+    """
+    picks = _assign(a * canonical + b, observed, tol)
+    sel = (picks >= 0) & np.isfinite(weights) & (weights > 0)
+    if int(sel.sum()) < SIZE_MIN_MATCHED:
+        return float("nan")
+    lw = np.log(weights[sel])
+    lh = np.log(np.maximum(heights[picks[sel]], 1.0))
+    if float(np.std(lw)) < 0.1 or float(np.std(lh)) <= 0:
+        return float("nan")
+    return float(np.corrcoef(lw, lh)[0, 1])
+
+
 def _nearest_distance(mapped: np.ndarray, observed: np.ndarray) -> np.ndarray:
     """Distance from each mapped RT to the closest observed apex (``mapped`` may be 2-D).
 
@@ -371,6 +415,8 @@ def _fit_line(
     observed: np.ndarray,
     tol: float,
     probe: tuple[float, float] | None = None,
+    weights: np.ndarray | None = None,
+    heights: np.ndarray | None = None,
 ) -> tuple[float, float, int] | None:
     """RANSAC-lite fit of ``observed ~= a * canonical + b``, returning ``(a, b, n_matched)``.
 
@@ -391,6 +437,15 @@ def _fit_line(
     before scoring. It is how a neighbouring channel's already-accepted map is imposed on this
     one (see :func:`align_rt_map`), and it is the difference between fitting a crowded channel
     correctly and locking onto a plausible-looking shifted solution.
+
+    ``weights`` (each analyte's certified mass in the standard) and ``heights`` (each detected
+    apex's height) break a near tie. Among candidates within :data:`SIZE_COUNT_SLACK` matches
+    of the best, one whose matched peaks agree with the standard's composition by at least
+    :data:`SIZE_CORR_MARGIN` more than the best's do is taken instead (:func:`_size_agreement`):
+    the analyst's own check that the big co-elution group sits on the big peak. The tie is a
+    tie between near neighbours: the candidate may move no position by more than
+    :data:`CONSENSUS_TOL` from the best line's, and the best line must itself be readable
+    (:data:`SIZE_MIN_MATCHED`). Without them the choice is by matches alone, as before.
 
     Returns ``None`` when the channel has too little to fit.
     """
@@ -413,6 +468,7 @@ def _fit_line(
     slope_lo, slope_hi = SLOPE_RANGE
 
     best_count, best_distance, best_line = -1, np.inf, None
+    candidates: list[tuple[int, float, float]] = []
     for i, j in zip(ci, cj):
         gap = float(canonical[j] - canonical[i])
         a = observed_gap / gap
@@ -434,10 +490,33 @@ def _fit_line(
             best_count = int(count[k])
             best_distance = float(distance[k])
             best_line = (float(a[k]), float(b[k]))
+        if weights is not None and heights is not None:
+            near = count >= best_count - SIZE_COUNT_SLACK
+            candidates.extend(zip(count[near].tolist(), a[near].tolist(), b[near].tolist()))
 
     if best_line is None:
         return None
     a, b = best_line
+    own = (_size_agreement(a, b, canonical, observed, tol, weights, heights)
+           if weights is not None and heights is not None and candidates else float("nan"))
+    if np.isfinite(own):
+        # The best-matching line, and its near ties, judged by the standard's composition.
+        a0, b0 = a, b
+        own_matched = int((_assign(a0 * canonical + b0, observed, tol) >= 0).sum())
+        seen: set[tuple[float, float]] = set()
+        best_size = own
+        for count_c, a_c, b_c in candidates:
+            key = (round(a_c, 3), round(b_c, 2))
+            if count_c < best_count - SIZE_COUNT_SLACK or key in seen:
+                continue
+            seen.add(key)
+            if float(np.max(np.abs((a_c - a0) * canonical + (b_c - b0)))) > CONSENSUS_TOL:
+                continue  # not a neighbour of the best line: a re-timing, not a slipped peak
+            if int((_assign(a_c * canonical + b_c, observed, tol) >= 0).sum()) < own_matched - SIZE_COUNT_SLACK:
+                continue
+            size = _size_agreement(a_c, b_c, canonical, observed, tol, weights, heights)
+            if np.isfinite(size) and size >= own + SIZE_CORR_MARGIN and size > best_size:
+                best_size, a, b = size, a_c, b_c
     for _ in range(2):
         picks = _assign(a * canonical + b, observed, tol)
         selected = picks >= 0
@@ -552,6 +631,8 @@ def align_rt_map(
     ordered: dict[tuple[float, float], list[Analyte]] = {}
     canonicals: dict[tuple[float, float], np.ndarray] = {}
     observations: dict[tuple[float, float], np.ndarray] = {}
+    masses: dict[tuple[float, float], np.ndarray] = {}
+    heights: dict[tuple[float, float], np.ndarray] = {}
     fits: dict[tuple[float, float], tuple[float, float, int]] = {}
 
     for transition, transition_analytes in grouped.items():
@@ -569,7 +650,11 @@ def align_rt_map(
         pool = PEAK_POOL_FACTOR * len(anchored) + PEAK_POOL_PAD
         observed = _detect_apexes(chrom.times, chrom.intensities, params, pool)
         observations[transition] = observed
-        fit = _fit_line(canonical, observed, params.rt_window)
+        # What the standard holds and how tall each detected peak is: the near-tie breaker.
+        masses[transition] = np.array([a.cal_mass for a in anchored], dtype=float)
+        heights[transition] = np.interp(observed, chrom.times, chrom.intensities.astype(float))
+        fit = _fit_line(canonical, observed, params.rt_window,
+                        weights=masses[transition], heights=heights[transition])
         if fit is not None:
             fits[transition] = fit
 
@@ -608,6 +693,8 @@ def align_rt_map(
                 observations[transition],
                 params.rt_window,
                 probe=(probe_rt, target),
+                weights=masses[transition],
+                heights=heights[transition],
             )
             if refit is not None:
                 a, b, n_matched = refit

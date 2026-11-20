@@ -15,6 +15,7 @@ import pytest
 
 from quant209.core.calibrate import build_anchors
 from quant209.core.config import Analyte, load_canonical_peaks
+from quant209.core.deconvolve import fit_unresolved_pair
 from quant209.core.integrate import (
     KNOWN_FLAGS,
     KNOWN_METHODS,
@@ -22,6 +23,7 @@ from quant209.core.integrate import (
     _resolve_boundaries,
     integrate_run,
     integrate_transition,
+    unresolved_pairs,
 )
 from quant209.core.mzml import Chromatogram, get_transition, read_srm_mzml
 from quant209.core.peaks import IntegrationParams, PeakResult
@@ -482,6 +484,7 @@ def test_deconvolution_refuses_a_rider_larger_than_its_parent():
 #: The order ``KNOWN_FLAGS`` documents, and the order every peak must spell its flags in.
 FLAG_ORDER = (
     "absent", "low_sn", "narrow", "clustered", "shoulder", "forced", "displaced", "apportioned",
+    "unresolved",
 )
 
 NO_RULES = IntegrationParams(forced_riders=(), forced_present=())
@@ -768,3 +771,119 @@ def test_two_comparable_congeners_merged_by_drift_are_split_by_a_two_peak_fit():
     assert abs(first.area / (1.2e6 * k) - 1) < 0.10, f"{first.area:,.0f} of {1.2e6 * k:,.0f}"
     assert abs(second.area / (1.9e6 * k) - 1) < 0.10, f"{second.area:,.0f} of {1.9e6 * k:,.0f}"
     _assert_auditable(first)
+
+
+# --------------------------------------------------------------------------------------
+# Pairs the run's calibration could not resolve
+# --------------------------------------------------------------------------------------
+
+
+def _merged_pair(offset: float = 0.075, sigma: float = 0.036, first_height: float = 1.4e5):
+    """A calibration-like envelope: two congeners ``offset`` minutes apart that show one apex.
+
+    Shaped on a real calibration in which PCB 45 rode the front of PCB 51 as a plateau.
+    The earlier congener's anchor is a prediction from the canonical spacing, as there.
+    """
+    first_rt, second_rt = 31.000, 31.000 + offset
+    times, signal = _trace((first_height, first_rt, sigma), (2.0e5, second_rt, sigma))
+    return times, signal, [_analyte("first", second_rt - 0.024), _analyte("second", second_rt)]
+
+
+def test_a_calibration_pair_merged_into_one_apex_loses_one_congener_without_the_pair_rule():
+    """The failure the rule exists for: one envelope, one apex, so one congener gets nothing."""
+    times, signal, analytes = _merged_pair()
+    off = _by_label(times, signal, analytes, NO_RULES)
+    lost = [r for r in off.values() if not r.detected]
+    assert len(lost) == 1, "one of the two has no apex of its own"
+    kept = next(r for r in off.values() if r.detected)
+    assert lost[0].area < 0.05 * kept.area
+
+
+def test_unresolved_pairs_finds_the_merged_pair_and_only_that():
+    times, signal, analytes = _merged_pair()
+    anchors = {a.label: a.cal_rt for a in analytes}
+    peaks = integrate_transition(times, signal, analytes, anchors, NO_RULES)
+    assert unresolved_pairs(peaks, analytes, anchors, NO_RULES) == {("first", "second")}
+
+    # Resolved: two apexes 0.20 min apart, both detected, nothing to split.
+    times, signal = _trace((2.0e5, 31.0, 0.03), (2.0e5, 31.2, 0.03))
+    resolved = [_analyte("first", 31.0), _analyte("second", 31.2)]
+    anchors = {a.label: a.cal_rt for a in resolved}
+    peaks = integrate_transition(times, signal, resolved, anchors, NO_RULES)
+    assert all(p.detected for p in peaks)
+    assert unresolved_pairs(peaks, resolved, anchors, NO_RULES) == frozenset()
+
+
+def _measured_anchors(times, signal, analytes):
+    """What the pipeline does in a calibration: find the pair, then measure where both elute."""
+    anchors = {a.label: a.cal_rt for a in analytes}
+    first_pass = {r.label: r for r in integrate_transition(times, signal, analytes, anchors, NO_RULES)}
+    kept = next(r for r in first_pass.values() if r.detected)
+    fit = fit_unresolved_pair(times, signal, anchors["first"], anchors["second"], kept.i_start, kept.i_end)
+    return fit, {"first": fit.first.centre, "second": fit.second.centre}
+
+
+def test_the_calibration_fit_measures_both_retention_times_and_shares():
+    times, signal, analytes = _merged_pair()
+    fit, anchors = _measured_anchors(times, signal, analytes)
+    # The earlier congener was anchored 0.024 min ahead of its neighbour by prediction; the
+    # fit finds it where it really elutes, 0.075 min ahead.
+    assert abs(anchors["first"] - 31.000) < 0.01 and abs(anchors["second"] - 31.075) < 0.01
+    share = fit.first.area / (fit.first.area + fit.second.area)
+    assert abs(share - 1.4 / 3.4) < 0.05, f"share {share:.3f}"
+
+
+def test_an_unresolved_pair_shares_its_envelope_at_the_measured_spacing():
+    times, signal, analytes = _merged_pair()
+    _fit, anchors = _measured_anchors(times, signal, analytes)
+    off = {r.label: r for r in integrate_transition(times, signal, analytes, anchors, NO_RULES)}
+    on = {r.label: r for r in integrate_transition(
+        times, signal, analytes, anchors, NO_RULES, unresolved=frozenset({("first", "second")}))}
+
+    # At its measured retention time the earlier congener would pass the shoulder test, but a
+    # pair the calibration showed eluting together is fitted as a pair, ahead of that test.
+    for r in on.values():
+        assert r.detected and "apportioned" not in r.flags, r
+        _assert_auditable(r)
+    first, second = on["first"], on["second"]
+    assert "unresolved" in first.flags and "unresolved" in second.flags
+    # Measured against the two true peaks: without the rule the shoulder skim gave the earlier
+    # congener barely a quarter, and its area was counted inside its neighbour's peak too.
+    unit = 0.036 * np.sqrt(2 * np.pi) * 60.0
+    assert abs(first.area / (1.4e5 * unit) - 1.0) < 0.06, f"first {first.area:,.0f}"
+    assert abs(second.area / (2.0e5 * unit) - 1.0) < 0.06, f"second {second.area:,.0f}"
+    assert off["first"].area / (off["first"].area + off["second"].area) < 0.30
+
+
+def test_a_single_peak_is_never_split_into_two_congeners():
+    """A congener alone looks like one peak. At the measured spacing it fits as one component
+    and nothing, which is no evidence of a second congener, so the peak is left whole."""
+    pair = frozenset({("first", "second")})
+    times, signal = _trace((2.0e5, 31.0, 0.036))
+    analytes = [_analyte("first", 31.0), _analyte("second", 31.075)]
+    anchors = {a.label: a.cal_rt for a in analytes}
+    on = integrate_transition(times, signal, analytes, anchors, NO_RULES, unresolved=pair)
+    assert on == integrate_transition(times, signal, analytes, anchors, NO_RULES)
+    assert not any("unresolved" in r.flags for r in on)
+
+
+def test_the_pair_rule_leaves_a_resolved_pair_and_an_empty_window_alone():
+    pair = frozenset({("first", "second")})
+    # Both congeners have their own apex in this file: the trace says how to split them.
+    times, signal = _trace((2.0e5, 31.0, 0.03), (2.0e5, 31.2, 0.03))
+    analytes = [_analyte("first", 31.0), _analyte("second", 31.2)]
+    anchors = {a.label: a.cal_rt for a in analytes}
+    with_pair = integrate_transition(times, signal, analytes, anchors, NO_RULES, unresolved=pair)
+    assert with_pair == integrate_transition(times, signal, analytes, anchors, NO_RULES)
+    # Only one congener's peak, far from the other's anchor: the other is not in that peak,
+    # and whatever the trace says about it is left exactly as without the rule.
+    times, signal = _trace((2.0e5, 31.0, 0.03))
+    analytes = [_analyte("first", 31.0), _analyte("second", 31.6)]
+    anchors = {a.label: a.cal_rt for a in analytes}
+    on = integrate_transition(times, signal, analytes, anchors, NO_RULES, unresolved=pair)
+    assert on == integrate_transition(times, signal, analytes, anchors, NO_RULES)
+    assert not any("unresolved" in r.flags for r in on)
+
+
+def test_unresolved_is_a_known_flag():
+    assert "unresolved" in KNOWN_FLAGS
