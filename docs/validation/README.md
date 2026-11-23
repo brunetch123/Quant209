@@ -15,7 +15,7 @@ sample identifiers derived from the acquisition filenames, so no row can be join
 fifteen unscored folders are reported and skipped rather than silently dropped. The figures
 below say nothing about them.
 
-That gives **41,240 detectable peak comparisons** across several analysts, two instruments and
+That gives **41,376 detectable peak comparisons** across several analysts, two instruments and
 four years of method drift.
 
 Every run goes through the production entry point with production defaults. No parameter is
@@ -29,15 +29,15 @@ mass ≥ 1 ng).
 
 | | rows | median &#124;RPD&#124; | within ±25% | total ratio |
 |---|---|---|---|---|
-| Peak areas | 41,240 | **2.04%** | **88.8%** | 1.004 |
-| Congener masses | 30,622 | **4.24%** | **84.1%** | 1.017 |
-| Surrogate recoveries | 6,591 | 0.021 mean absolute error | | |
+| Peak areas | 41,376 | **1.94%** | **90.5%** | 1.006 |
+| Congener masses | 30,712 | **4.03%** | **86.5%** | 1.019 |
+| Surrogate recoveries | 6,711 | 0.021 mean absolute error | | |
 
 Areas and masses both meet the acceptance criteria (median ≤ 10%, ≥ 80% within ±25%). A
 mass multiplies three measured quantities, so it inherits the area disagreement and adds to
 it, and its coverage clears the gate by less.
 
-**No run disagrees by more than 7.4% at the median.** The best is 0.67%. **No sample's
+**No run disagrees by more than 7.4% at the median.** The best is 0.68%. **No sample's
 total native PCB mass differs from the analyst's by 2× or more**, apart from two trace-level
 samples where the difference is a few nanograms.
 
@@ -55,38 +55,44 @@ like for like.
 
 ## Changes since 1.0.0
 
-| | 1.0.0 | 1.1.0 | current |
-|---|---|---|---|
-| Peak areas: median &#124;RPD&#124;, within ±25% | 2.13%, 87.1% | 2.12%, 87.4% | 2.04%, 88.8% |
-| Congener masses: median &#124;RPD&#124;, within ±25% | 4.61%, 78.7% | 4.60%, 79.0% | 4.24%, 84.1% |
-| Total absolute mass error, detectable rows | 3,214k ng | 3,004k ng | 1,565k ng |
-| Detectable rows reported at 1% or less of the analyst's value | 1,673 | 1,340 | 1,174 |
+| | 1.0.0 | 1.1.0 | 1.2.0 | 1.3.0 | 1.4.0 |
+|---|---|---|---|---|---|
+| Peak areas: median &#124;RPD&#124;, within ±25% | 2.13%, 87.1% | 2.12%, 87.4% | 2.04%, 88.8% | 1.99%, 89.8% | 1.94%, 90.5% |
+| Congener masses: median &#124;RPD&#124;, within ±25% | 4.61%, 78.7% | 4.60%, 79.0% | 4.24%, 84.1% | 4.14%, 85.5% | 4.03%, 86.5% |
+| Total absolute mass error, detectable rows | 3,214k ng | 3,004k ng | 1,565k ng | 1,474k ng | 1,434k ng |
+| Detectable rows reported at 1% or less of the analyst's value | 1,673 | 1,340 | 1,174 | 922 | 935 |
 
 1.1.0's changes come from the named rules for congeners 83, 117, 90+101+113 and 118
-([`../METHODS.md`](../METHODS.md) section 2.7), whose peaks carry the `forced` flag. The
-current code adds the displaced-peak rule (section 2.8). In a concentrated sample a dominant
-peak can drift into a minor neighbour's retention-time window, and the neighbour was credited
-with all of it. The rule gives 108 such peaks back, flagged `displaced`. The current code
-also reads a sample whose internal standards are all diluted in step as a dilution rather
-than refusing it (section 7.3), which quantifies six more samples, and splits envelopes
-two comparable congeners merged into by a two-peak fit, flagged `apportioned`. It no longer
-lets a calibration injection whose retention times do not fit anchor other files, searches a
-file whose labelled standards moved where they went (flagged `realigned`), reports a missing
-internal standard as an error with no mass, and scores every analyst sheet against the file it
-came from. Together with the ground-truth corrections above, the total absolute mass error
-is 48% below 1.1.0's. The area median barely moves, because these act on few rows. The named rules, and two details of the displaced-peak rule, were chosen by reading
-this same comparison, so that share of the improvement is in-sample.
+([`../METHODS.md`](../METHODS.md) section 2.7), whose peaks carry the `forced` flag. 1.2.0
+adds the displaced-peak rule (section 2.8). In a concentrated sample a dominant peak can drift
+into a minor neighbour's retention-time window, and the neighbour was credited with all of it.
+The rule gives 108 such peaks back, flagged `displaced`. 1.2.0 also reads a sample whose
+internal standards are all diluted in step as a dilution rather than refusing it (section
+7.3), which quantifies six more samples, and splits envelopes two comparable congeners merged
+into by a two-peak fit, flagged `apportioned`. It no longer lets a calibration injection whose
+retention times do not fit anchor other files, searches a file whose labelled standards moved
+where they went (flagged `realigned`), reports a missing internal standard as an error with no
+mass, and scores every analyst sheet against the file it came from. 1.3.0 splits the envelope
+two neighbouring congeners share where a run's calibration does not separate them, flagged
+`unresolved` (section 2.9), and settles near ties in the retention-time alignment by the
+standard's composition (section 3.1). 1.4.0 keeps ghost peaks, the copy of a congener's peak
+that losing HCl or Cl2 in the ion source leaves on a lower homolog's channel, out of
+integrations, flagged `ghost` (section 2.10), and follows a file's drift along a curve
+(section 3.3). Together with the ground-truth corrections above, the total absolute mass error
+is 52% below 1.1.0's. The area median barely moves, because these act on few rows. The named
+rules, and two details of the displaced-peak rule, were chosen by reading this same
+comparison, so that share of the improvement is in-sample.
 
 ## Agreement against signal
 
 | manual area (counts·s) | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| > 10⁶ | 2,391 | 0.6% | 92.3% |
-| 10⁵ – 10⁶ | 6,316 | 1.0% | 93.4% |
-| 10⁴ – 10⁵ | 13,017 | 1.7% | 91.1% |
-| 10³ – 10⁴ | 19,516 | 3.2% | 85.3% |
-| 10² – 10³ | 25,752 | 12.1% | 67.4% |
-| < 10² | 51,333 | 109% | 17.7% |
+| > 10⁶ | 2,394 | 0.5% | 93.9% |
+| 10⁵ – 10⁶ | 6,321 | 0.9% | 95.1% |
+| 10⁴ – 10⁵ | 13,076 | 1.6% | 92.8% |
+| 10³ – 10⁴ | 19,585 | 3.1% | 87.0% |
+| 10² – 10³ | 25,903 | 11.7% | 68.2% |
+| < 10² | 52,084 | 107% | 18.1% |
 
 The bottom two bands are below the reporting threshold. In that range, manual integration is
 imprecise too, and results are censored against the limit of quantification. They are shown
@@ -96,14 +102,14 @@ for completeness, not as a claim.
 
 | homolog | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| mono | 751 | 1.07% | 99.3% |
-| di | 3,551 | 1.60% | 98.5% |
-| tri | 5,717 | 1.95% | 96.6% |
-| tetra | 7,712 | 2.18% | 88.5% |
-| penta | 9,029 | 2.71% | 82.5% |
-| hexa | 8,930 | 1.91% | 85.8% |
-| hepta | 4,416 | 1.68% | 91.0% |
-| octa | 975 | 3.36% | 77.0% |
+| mono | 757 | 1.05% | 99.3% |
+| di | 3,575 | 1.60% | 98.5% |
+| tri | 5,740 | 1.95% | 97.1% |
+| tetra | 7,730 | 2.18% | 89.6% |
+| penta | 9,067 | 2.63% | 82.6% |
+| hexa | 8,962 | 1.62% | 90.9% |
+| hepta | 4,411 | 1.60% | 93.5% |
+| octa | 975 | 3.34% | 76.4% |
 | nona | 147 | 5.03% | 89.8% |
 | deca | 12 | 9.17% | 91.7% |
 
@@ -112,13 +118,13 @@ crowded window in the method. Crowding is where automated and manual integration
 
 ## Where the disagreement is
 
-1,174 detectable rows (2.8% of comparisons) are reported at 1% or less of the analyst's
+935 detectable rows (2.3% of comparisons) are reported at 1% or less of the analyst's
 value. They are two different failures.
 
-- **Riders on a larger neighbour's leading edge.** The 1,099 rows below 10⁶ counts·s are many
-  but small: together they carry 0.4% of the analyst's detectable area. Four congeners (115,
-  88, 143 and 98) supply 417 of them. The separation there is genuinely ambiguous.
-- **Dominant peaks in concentrated samples.** The 75 rows above 10⁶ counts·s carry 3.7% of
+- **Riders on a larger neighbour's leading edge.** The 882 rows below 10⁶ counts·s are many
+  but small: together they carry 0.2% of the analyst's detectable area. Four congeners (115,
+  88, 98 and 143) supply 379 of them. The separation there is genuinely ambiguous.
+- **Dominant peaks in concentrated samples.** The 53 rows above 10⁶ counts·s carry 3.3% of
   the analyst's detectable area, down from 8.7% before the displaced-peak rule. The peak's
   top moves off its retention-time anchor and the area goes to the wrong congener, while each
   file's total area still agrees with the analyst's. The rule gives back the clear cases.

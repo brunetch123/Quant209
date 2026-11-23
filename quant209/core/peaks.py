@@ -97,6 +97,14 @@ class IntegrationParams:
     #: the analyte carries the ``displaced`` flag. Set to 0 to turn the rule off. See
     #: ``docs/METHODS.md`` section 2.8.
     dominance_ratio: float = 10.0
+    #: Ghost peaks. A congener's in-source fragments leave a copy of its peak on the channels of
+    #: the homologs one and two chlorines down, at its own retention time. Where the lower trace
+    #: confirms the copy's shape it is kept out of that channel's integration: fenced off from
+    #: its neighbours' windows, or subtracted from under an analyte it would be taken for, and
+    #: the peaks this changes carry the ``ghost`` flag. Applied by the pipeline
+    #: (``core.ghosts.integrate_with_ghosts``), not by ``integrate_run``. Set False to integrate
+    #: the traces as acquired. See ``docs/METHODS.md`` section 2.10.
+    ghost_correction: bool = True
 
 
 @dataclass

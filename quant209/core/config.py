@@ -19,6 +19,7 @@ from importlib import resources
 _CSV_PACKAGE = "quant209.config"
 _CSV_NAME = "canonical_peaks.csv"
 _ABUNDANCE_NAME = "aroclor_abundance.csv"
+_GHOST_NAME = "ghost_fractions.csv"
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,25 @@ def load_aroclor_abundance() -> dict[str, float]:
     with path.open("r", newline="", encoding="utf-8") as fh:
         lines = [line for line in fh if not line.startswith("#")]
     return {row["label"]: float(row["fraction"]) for row in csv.DictReader(lines)}
+
+
+@lru_cache()
+def load_ghost_fractions() -> dict[str, dict[int, float]]:
+    """Each congener's ghost-peak ratio, ``{label: {step: ratio}}``.
+
+    A congener's in-source fragment (HCl lost: step 1; Cl2 lost: step 2) leaves a copy of its
+    peak on the channel one or two homologs down (``core.ghosts``). ``ratio`` is that copy's size
+    relative to the internal standard PCB 204's copy on the same step in the same injection,
+    measured on the archive from copies that stand clear. A congener with no entry is never
+    corrected. Callers must treat the mapping as read-only.
+    """
+    path = resources.files(_CSV_PACKAGE).joinpath(_GHOST_NAME)
+    with path.open("r", newline="", encoding="utf-8") as fh:
+        lines = [line for line in fh if not line.startswith("#")]
+    out: dict[str, dict[int, float]] = {}
+    for row in csv.DictReader(lines):
+        out.setdefault(row["label"], {})[int(row["step"])] = float(row["ratio"])
+    return out
 
 
 def analytes_by_transition(analytes: list[Analyte]) -> dict[tuple[float, float], list[Analyte]]:

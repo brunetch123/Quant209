@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.4.0 (2026-11-22)
+
+### Integration
+
+- **Ghost peaks are kept out of integrations.** A PCB with n chlorines that loses HCl or Cl2 in
+  the ion source leaves a copy of its peak on the channel for n-1 or n-2 chlorines, at its own
+  retention time and with its shape. The internal standard 204 puts 4-6% of its area on the
+  hepta channel and 14-16% on the hexa channel in every injection that holds it, where the copy
+  was reported as 156+157 or taken into the windows of 172 and 171+173. Native congeners do the
+  same, and in the calibration standards their copies fell inside windows that response factors
+  are measured in. Each copy is now predicted from a per-congener table
+  (`quant209/config/ghost_fractions.csv`) and the run's own 204 fraction, read in its blanks,
+  and confirmed by fitting the parent peak's shape. A confirmed copy between analytes is fenced
+  off so no window takes it. One on an analyte's expected retention time is subtracted, never
+  beyond the prediction, except under PCB 58 and PCB 159, whose reported peaks usually hold the
+  copy of PCB 95 and PCB 174. A copy the trace cannot confirm is left alone. Changed peaks carry
+  the new `ghost` flag. `IntegrationParams.ghost_correction = False` turns it off. See
+  [`docs/METHODS.md`](docs/METHODS.md) section 2.10.
+- **Effect.** On the benchmark, rows within ±25% of the analyst rise from 89.8% to 90.5% for
+  peak areas and from 85.5% to 86.5% for masses, sample totals within ±25% from 97.7% to 98.1%,
+  and rows reported where the analyst has no peak fall from 2,742 to 2,041. 105's response
+  factor lies within ±25% of the analyst's in 98.3% of runs (63.8% before), 156+157's in 82.8%
+  (58.6%). On the validation dataset, areas within ±25% rise from 86.9% to 87.5% and masses from
+  85.7% to 86.7%. A run takes about 30% longer.
+
+### Retention-time alignment
+
+- **A file's drift is followed along a curve, not by one shift.** A file whose chromatography
+  drifted from its calibration's was searched at one shift, which fits a step but not a slope.
+  In two concentrated runs the labelled standards sat 0.05 min late at 23 min and 0.33 min late
+  at 67 min, and a search 0.1 min off credits a congener with its neighbour's peak. The file's
+  drift is now a curve through every labelled standard it shows, and each analyte is searched
+  where the curve puts it. See [`docs/METHODS.md`](docs/METHODS.md) section 3.3.
+- **A shift is kept only if the native congeners corroborate it.** Standards that sat off their
+  calibration anchors in every file of a run set the `realigned` flag on files whose natives had
+  not moved. The new integration must now find more native peaks where it moved the search than
+  the unshifted one, so a file with nothing in the moved region to check it against is left
+  alone, and a peak several times a standard's usual height is no longer taken for the
+  standard.
+- **A lost internal standard starts the same search when the other standards show a drift.**
+  A file whose labelled standards were all still found, but 0.1 to 0.2 min late, lost its
+  internal standard 204 on a crowded channel and with it every mass that standard normalises.
+  Three standards found where expected, with a median offset beyond half the apex search
+  window, now start the search for it.
+- **Effect.** On the 49 benchmark runs it acts on 1 file instead of 2 and changes no other:
+  that file's rows within ±25% of the analyst rise from 84.5% to 90.5% for peak areas and from
+  77.5% to 83.8% for masses. In archive runs added since the benchmark it acts on 18 more files.
+  Across the 21 files whose results change, rows within ±25% of the analyst rise from 54.8% to
+  62.0% for peak areas and from 57.6% to 67.9% for masses (the 14 changed files the analyst
+  quantified), and six files that had lost their internal standard 204 get it back, with the
+  masses it normalises.
+
+### Documentation
+
+- The README, [`docs/METHODS.md`](docs/METHODS.md) sections 6 and 7 and
+  [`docs/validation/README.md`](docs/validation/README.md) report this version's validation
+  figures: peak areas 1.94% median |RPD| and 90.5% within ±25%, congener masses 4.03% and 86.5%,
+  surrogate recoveries 0.021 mean absolute error. METHODS sections 7.1, 7.2 and 7.8 and
+  `docs/validation/README.md` had kept earlier versions' figures and are brought up to date.
+
 ## 1.3.0 (2026-11-20)
 
 ### Integration

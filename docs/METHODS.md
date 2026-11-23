@@ -188,7 +188,7 @@ converted to seconds. Smoothing (Savitzky-Golay, window 5, order 2) is used for 
 only. The raw signal is what is integrated. A reported area is therefore a measurement of the
 acquired trace, not of a filtered version of it.
 
-Nine flags. Each says something different, and a peak carries its flags in the order of this
+Eleven flags. Each says something different, and a peak carries its flags in the order of this
 table, so the same set is always spelled the same way:
 
 | flag | meaning |
@@ -202,7 +202,8 @@ table, so the same set is always spelled the same way:
 | `displaced` | this analyte's peak drifted outside its own retention-time territory into a minor neighbour's, and was given back to it on the strength of published Aroclor profiles (section 2.8). The peak is measured from the trace. Which congener it belongs to is the judgement to check. |
 | `apportioned` | this analyte and a neighbour of comparable abundance had merged into one envelope, and its area is its share by a two-peak fit (section 2.8). Both members of the pair carry the flag. |
 | `unresolved` | this run's calibration did not separate this analyte from its neighbour, and in this file the two shared one envelope; its area is its component of a two-peak fit at the spacing the calibration measured (section 2.9). Both members of the pair carry the flag. |
-| `realigned` | this analyte was searched at a retention time moved by a shift measured on this file's own labelled standards (section 3.3). The peak is read off the trace. Only where to look was corrected. |
+| `ghost` | a higher-chlorinated congener's peak left a copy of itself on this analyte's channel (in-source loss of HCl or Cl2), and this result is the one with that copy kept out of the window or subtracted (section 2.10). Each copy's source, size and shape correlation are recorded on the file. |
+| `realigned` | this analyte was searched at a retention time moved along the drift curve of this file's own labelled standards (section 3.3). The peak is read off the trace. Only where to look was corrected. |
 
 ### 2.6 Riders: the shoulder test and shape fitting
 
@@ -419,6 +420,94 @@ a fitted spacing of 0.073 to 0.085 min (the runs that resolve the pair show 0.07
 first of them, PCB 45's response factor comes out at 3.32 against the analyst's 3.27, where it
 had none, and PCB 51's at 2.17 against 2.41, where it had 1.64.
 
+### 2.10 Ghost peaks: a congener's fragments on lower homologs' channels
+
+Implemented in `quant209/core/ghosts.py` (`integrate_with_ghosts`), with the per-congener table
+`quant209/config/ghost_fractions.csv`, and applied by `run_analysis` and `realign_shifted_file`
+(`quant209/core/pipeline.py`). `IntegrationParams.ghost_correction = False` turns it off.
+
+**The problem.** A PCB with n chlorines can lose HCl or Cl2 in the ion source. The fragment has
+exactly the precursor mass of the transition for n-1 chlorines (HCl lost) or n-2 (Cl2 lost), and
+its own loss of Cl2 gives that transition's product ion, so the instrument records a copy of the
+congener's peak on the lower channel, at the congener's own retention time and with its shape.
+This document calls it a ghost peak. The internal standard PCB 204 shows it in every injection
+that holds it: 4-6% of its area on the hepta channel and 14-16% on the hexa channel since 2021
+(2% on hexa in 2019), absent from every injection without 204, apex within one acquisition
+cycle of 204's, shape correlation above 0.99, and proportional to 204 in blanks, references
+and samples alike. Every octa-, nona- and deca-CB and most penta- to hepta-CBs do the same:
+2-5% one step down and up to about 25% two steps down. Only steps whose precursor and product
+masses both match can happen: a tetra-CB losing Cl2 cannot give the di-CB product ion, and mono-
+to tri-CBs give none.
+
+A copy is not an analyte, and the analysts leave it out. Integrated as acquired, it became one
+in two ways. A copy on a congener's expected retention time was reported as that congener:
+PCB 204's as 156+157, in every blank. A copy between congeners was swallowed by a neighbour's
+valley-bounded window: PCB 204's under 172 and 171+173. The calibration standard holds every
+congener, so its channels carry copies throughout, and several fell inside the windows that
+response factors are measured in. In one 2024 standard, 39's window ran from 26.65 to 27.46 min
+and took PCB 104's Cl2-loss copy at 27.19 min, which made up a fifth of 39's area.
+
+**The rule.** Each file is integrated as acquired, then every peak of a congener in
+`ghost_fractions.csv`, and of 204, is taken from the highest homolog down, and its copy on each
+lower channel its masses allow is looked for:
+
+* *Predicted.* The copy's size is the congener's ratio times the run's 204 fraction. The ratio
+  is the congener's own propensity relative to 204's, measured once on the archive from copies
+  that stand clear (shape correlation >= 0.98, signal-to-noise >= 10, no analyte expected
+  within 0.15 min): 145 ratios for 106 congeners. The 204 fraction carries the instrument's
+  scale. It is read in the run's own blanks, where 204 stands nearly alone, as the median over
+  up to four of them, before any file is integrated. A blank's copy is small and noisy, so there
+  a shape correlation of 0.5 suffices. A run without a usable blank reads it in
+  its reference injections, and a file in a run with neither reads it off its own 204 peak
+  where the copy stands clear.
+* *Confirmed.* The lower trace is fitted to the parent peak's shape over the parent's core, with
+  a sub-cycle shift allowed. The copy counts only when the trace follows that shape (correlation
+  >= 0.95). A copy the trace cannot confirm, typically one under a real peak of the lower homolog,
+  is left alone: there the analysts integrate the peak whole, the copy with it.
+* *Kept out.* A copy more than 0.10 min from every analyte's expected retention time on its
+  channel stays in the trace, and a placeholder analyte is anchored on it, so neighbouring
+  windows end at the valley before it, as an analyst draws them, and no analyte's apex search can
+  take it. The placeholder's result is discarded. A copy within 0.10 min of an analyte's expected
+  retention time could be taken for that analyte, so it is subtracted: the measured copy, never
+  more than predicted, so that a real peak underneath keeps everything above the copy, and never
+  below the local baseline. Nothing is subtracted under an internal standard, nor under PCB 58
+  or PCB 159. PCB 95's HCl-loss copy elutes 0.09 min before 58 and PCB 174's with 159, and where
+  either congener is reported, the reported peak usually holds the copy.
+* *Bounded.* Only the channels a copy touched are integrated again. An analyte takes the new
+  result only if it is no larger than the first and smaller by no more than 1.5 times the copies
+  inside its first window (plus 3% and 200 counts*s); anything else keeps the first result. A
+  peak whose reported result changed carries the **`ghost`** flag, and every copy found is
+  recorded on the file with its source, size, shape correlation and treatment.
+
+**What it changes.** Both test sets were run with the correction on and off, everything else
+equal. On the 49 benchmark runs of section 6, peak areas within ±25% of the analyst rise from
+89.8% to 90.5% of the 41,376 detectable native rows (287 rows in, 36 out) and masses from 85.5%
+to 86.5% of 30,712 (321 in, 27 out). The total mass disagreement falls by 2.7%, sample totals
+within ±25% rise from 97.7% to 98.1% of 480, and rows reported at 1,000 counts·s or more where
+the analyst has no peak fall from 2,742 to 2,041. Much of the gain comes through response
+factors, which every sample of a run inherits. With the copies out of the calibration windows,
+105's response factor lies within ±25% of the analyst's in 98.3% of runs (63.8% before),
+156+157's in 82.8% (58.6%), 167's in all of them (91.4%) and 39's in 98.3% (94.8%).
+
+On the 142 runs of the validation dataset, areas within ±25% rise from 86.9% to 87.5% and masses
+from 85.7% to 86.7%. The changed response factors within ±25% of the analysts' rise from 89.0% to
+95.0%, and rows reported where the analyst has no peak fall from 6,050 to 4,908. Counted in both
+directions, 1,255 rows above 1,000 counts·s move closer to the analyst and 240 further, and 1,839
+smaller rows closer and 390 further. Four congeners move further on balance: PCB 22 and 35 by 5
+rows each, 170 by 2 and 68 by 1. The 204 fraction was read in the run itself in 131 of the 142
+runs on the hepta channel and in 132 on the hexa channel, at medians of 4.9% and 14.9%.
+
+PCB 58 and PCB 159 keep the copy where it sits under them. Subtracting it there as well would
+take 114 dataset rows the analysts report at 1,000 counts·s or more outside ±25% (50 of 58, 64
+of 159; 66 on the benchmark). It would bring 188 smaller rows closer to the analysts' areas and
+remove 138 rows reported where the analyst has no peak (103 on the benchmark).
+
+One thing moves the other way: dataset sample totals within ±25% fall from 95.0% to 94.5%. Of
+the 15 samples that move outside, 14 hold less than 10 ng, where PCB 204's copy counted as
+156+157 had made up for a shortfall elsewhere. Removing it brings 156+157 closer to the
+analysts' value and the total further below theirs. The correction adds about 30% to a run's
+processing time.
+
 ---
 
 ## 3. Per-run retention-time alignment and the run-fit guard
@@ -502,35 +591,50 @@ internal standards. With it excluded, the run passes, the sample is quantified, 
 recoveries and its two late surrogates' masses come right. If no injection fits, nothing is
 excluded and the run fails as before.
 
-### 3.3 A file whose labelled standards moved
+### 3.3 A file whose chromatography drifted
 
 Each file is integrated at the retention times of the calibration injection nearest it. That
 is right as long as the file's chromatography matches its calibration's. In one archive file
 it did not: everything from 16 to 24 min eluted 0.2 min late. The internal standard 30D and
 three surrogates were searched in the wrong place and lost, and with the standard went the
 masses of about a hundred congeners. The sample came out at 170 ng against the analyst's 1,486.
+In two concentrated runs the drift was a slope, not a step: the labelled standards sat 0.05 min
+late at 23 min and 0.33 min late at 67 min. One shift fits that only roughly, and in a crowded
+region a search 0.1 min off credits a congener with its neighbour's peak.
 
 The labelled standards are spiked into every file, so they show where its chromatography went.
-`realign_shifted_file`, in `quant209/core/pipeline.py`, acts only when all of these hold:
+`realign_shifted_file`, in `quant209/core/pipeline.py`, acts when either of these holds:
 
 * at least two labelled standards on channels that carry no native congener
   (`landmark_labels`) were lost in this file, while the run's other files find them;
-* each is found within 0.4 min of where it was expected, at 15% or more of its typical height
-  in the run's samples and blanks;
-* they agree on the shift to within 0.1 min, and the shift is larger than the apex search
-  window.
+* an internal standard was lost while three labelled standards that were found where they were
+  expected show a median offset larger than the apex search window's half-width.
 
-Every analyte from the first to the last moved standard, plus 1 min either side, is then
-searched that much later. The new integration is kept only if it recovers those standards,
-loses no standard that was found before, and finds no fewer native peaks in that span.
-Otherwise the file is left exactly as integrated. Moved peaks carry the **`realigned`** flag,
-and the run note says which standards moved, by how much, and how many native peaks were found
-before and after.
+A lost standard is looked for within 0.4 min of where it was expected. A peak there counts only
+if it reaches 15% of the standard's typical height in the run's samples and blanks and stays
+below three times it, since a standard is spiked at one amount. The offsets found must lie on one
+straight line, none further from it than 0.1 min, and the line may rise or fall by no more than
+0.05 min per minute.
 
-On the archive it acts on 2 of 672 reported files and changes no other. The file above now
-agrees with the analyst, at 1,511 ng against 1,486. The other is an injection the analyst left
-unquantified: two of its surrogates are recovered, and its earliest region, which moved beyond
-the search, keeps the missing-internal-standard error of section 4.2.
+The file's drift curve then runs through every labelled standard it shows, those found where they
+went and those found where they were expected. Each analyte whose offset on the curve exceeds the
+apex search window's half-width is searched where the curve puts it. The new integration is kept
+only if it recovers the standards that were lost, loses none that was found before, and finds
+**more** native peaks where the search moved than before. A shift the native congeners do not
+share leaves their count where it was, so it is refused, and so is a file with no native peak in
+the moved region to corroborate it. Otherwise the file is left exactly as integrated. Moved peaks
+carry the **`realigned`** flag, and the run note says which standards moved, by how much, and how
+many native peaks were found before and after.
+
+On the 49 benchmark runs it acts on 1 of 672 reported files and changes no other. That file,
+the one above, now totals 1,547 ng against the analyst's 1,486, with 90.5% of its rows within
+±25% of the analyst (84.5% under the single shift it replaces). The other file the earlier rule
+moved, an injection the analyst left unquantified, is left as integrated: its two found
+standards disagreed by 0.18 min over 2.35 min, a steeper line than any drift measured. In
+archive runs added since the benchmark it acts on 18 more files. Across the 21 files whose
+results change, rows within ±25% of the analyst rise from 54.8% to 62.0% for peak areas and from
+57.6% to 67.9% for masses (the 14 changed files the analyst quantified), and six files that had
+lost their internal standard 204 get it back, with the masses it normalises.
 
 ---
 
@@ -770,8 +874,8 @@ scored value is consulted.
 
 | | rows | median &#124;RPD&#124; | within ±25% | total ratio |
 |---|---|---|---|---|
-| Peak areas | 41,376 | **1.99%** | **89.8%** | 1.008 |
-| Congener masses | 30,712 | **4.14%** | **85.5%** | 1.015 |
+| Peak areas | 41,376 | **1.94%** | **90.5%** | 1.006 |
+| Congener masses | 30,712 | **4.03%** | **86.5%** | 1.019 |
 | Surrogate recoveries | 6,711 | 0.021 mean absolute error | | |
 
 Areas and masses both clear both gates. Mass agreement still trails area agreement, for the
@@ -782,31 +886,32 @@ comes from the named rules of section 2.7, the displaced-peak rule of section 2.
 diluted injections as dilutions (section 7.3), excluding a calibration injection that does not
 fit (section 3.2), searching a shifted file where its standards went (section 3.3), scoring
 every analyst sheet against the file it came from, and putting the analyst's group masses on
-one basis (both section 6.1), and, in version 1.3, splitting the pairs a run's calibration does
+one basis (both section 6.1). Version 1.3 added splitting the pairs a run's calibration does
 not resolve (section 2.9) and settling near ties in the retention-time alignment by the
-standard's composition (section 3.1). The area median barely moves, because these act on few
-rows. What moves is the large error: total absolute mass error on detectable rows fell from
-3,214k ng in version 1.0 to 3,004k with the named rules, to 1,565k in version 1.2 and to 1,474k
-now. No sample's native total differs from the analyst's by 2× or more, except two trace-level
-samples where the difference is a few nanograms, and only 11 of 480 by 25% or more, seven of
-them under 11 ng. The total ratios went from 0.975 to 1.008 for areas and from 0.991 to 1.015
-for masses.
+standard's composition (section 3.1), and version 1.4 keeping ghost peaks out of integrations
+(section 2.10) and following a file's drift along a curve (section 3.3). The area median barely
+moves, because these act on few rows. What moves is the large error: total absolute mass error
+on detectable rows fell from 3,214k ng in version 1.0 to 3,004k with the named rules, to 1,565k
+in version 1.2, to 1,474k in version 1.3 and to 1,434k now. No sample's native total differs
+from the analyst's by 2× or more, except two trace-level samples where the difference is a few
+nanograms, and only 9 of 480 by more than 25%, five of them under 3 ng. The total ratios went
+from 0.975 to 1.006 for areas and from 0.991 to 1.019 for masses.
 
-No run in the archive disagrees by more than 7.4% at the median. The best sits at 0.67%.
+No run in the archive disagrees by more than 7.4% at the median. The best sits at 0.68%.
 Agreement tracks signal:
 
 | manual area (counts·s) | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| > 10⁶ | 2,394 | 0.6% | 93.9% |
-| 10⁵ – 10⁶ | 6,321 | 0.9% | 95.0% |
-| 10⁴ – 10⁵ | 13,076 | 1.6% | 92.3% |
-| 10³ – 10⁴ | 19,585 | 3.1% | 86.1% |
-| 10² – 10³ | 25,903 | 11.8% | 68.1% |
-| < 10² | 52,084 | 108% | 18.0% |
+| > 10⁶ | 2,394 | 0.5% | 93.9% |
+| 10⁵ – 10⁶ | 6,321 | 0.9% | 95.1% |
+| 10⁴ – 10⁵ | 13,076 | 1.6% | 92.8% |
+| 10³ – 10⁴ | 19,585 | 3.1% | 87.0% |
+| 10² – 10³ | 25,903 | 11.7% | 68.2% |
+| < 10² | 52,084 | 107% | 18.1% |
 
 The last two bands sit below the reporting threshold and are shown for completeness. By
 homolog, area agreement runs from 1.1% (mono) to 5.0% (nona). Penta is the weakest of the
-well-populated homologs at 2.7%, and carries the most crowded transition in the method.
+well-populated homologs at 2.6%, and carries the most crowded transition in the method.
 
 Performance: cold start runs at 0.7-0.9 s median against a 3 s budget. A 29-file run processes
 in seconds, and the interface does not stall for more than 100 ms while processing.
@@ -817,29 +922,30 @@ in seconds, and the interface does not stall for more than 100 ms while processi
 
 ### 7.1 Congeners buried on a larger peak's leading edge
 
-**1,174 detectable rows (2.8% of rows) are reported at 1% or less of the analyst's value.**
-They are overwhelmingly flagged `absent` (1,082 of them), so they are reported as flagged
-rather than passing silently. Version 1.0 had 1,673. Most of the difference is congeners 83
-and 117, now handled by a named rule (section 2.7). The rows are two different failures. The
-1,099 below 10⁶ counts·s are many but small: they carry 0.4% of the analyst's detectable
-area. The 75 above it carry 3.7%, and are the subject of section 7.2.
+**935 detectable rows (2.3% of rows) are reported at 1% or less of the analyst's value.**
+They are overwhelmingly flagged `absent` (856 of them), so they are reported as flagged
+rather than passing silently. Version 1.0 had 1,673. The named rules of section 2.7 removed
+333 of them and later changes a further 405. The rows are two different failures. The 882
+below 10⁶ counts·s are many but small: they carry 0.2% of the analyst's detectable area. The
+53 above it carry 3.3%, and are the subject of section 7.2.
 
-Four congeners supply 417 of the small rows: **115, 88, 143 and 98**. Each elutes on the
+Four congeners supply 379 of the small rows: **115, 88, 98 and 143**. Each elutes on the
 *leading* edge of a much larger neighbour. The trace climbs monotonically through them, so
 they produce no local maximum and no valley. The presence test rejects them, and either the
 shoulder test finds too little curvature or the shape fit of section 2.6 cannot justify its
-result. Where the fit does succeed, it works about as well as a fit can here: 3,007
-detectable rows are resolved that way, at 16.3% median |RPD| with 63% inside the band. On
+result. Where the fit does succeed, it works about as well as a fit can here: 3,039
+detectable rows are resolved that way, at 16.6% median |RPD| with 62% inside the band. On
 these four, however, the separation is genuinely ill-posed: two overlapping peaks can trade
 amplitude and reproduce the observed envelope equally well.
 
 ### 7.2 Concentrated samples: dominant peaks the rule does not reach
 
-**75 detectable rows, in 41 files from 13 runs, are dominant peaks the analyst integrates at
-more than 10⁶ counts·s and Quant 209 reports at 1% or less.** They carry 3.7% of the
+**53 detectable rows, in 28 files from 10 runs, are dominant peaks the analyst integrates at
+more than 10⁶ counts·s and Quant 209 reports at 1% or less.** They carry 3.3% of the
 analyst's detectable area, down from 8.7% before the displaced-peak rule of section 2.8, and
-they remain the largest disagreement by area. The congeners are major components of the
-technical mixtures, led by 86+97+109+119 (17 rows) and 129+138+163 (15).
+they remain the largest disagreement by area. The leading congeners are 86+97+109+119 (17
+rows), a major component of the technical mixtures, and 115 (11), which shares an envelope with
+110 (section 2.8).
 
 The mechanism was traced on the largest cases. In a concentrated sample a dominant peak
 broadens, to half-height widths of 0.12 to 0.17 min on the files examined, and its top moves
@@ -847,15 +953,18 @@ off its anchor by up to 0.18 min. The apex search is confined to the analyte's o
 so it stops on the peak's flank, where there is no prominence, and the analyte is reported
 absent. The files' total areas still agree with the analyst's, at a median of 0.99, so the
 area is measured and misattributed rather than lost. Section 2.8 resolves the clear cases.
-Of the 75 that remain:
+When the 75 such rows of version 1.2 were classified:
 
-* 26 have no single neighbour holding the missing area. It is spread over several analytes.
-* 24 are a major congener beside a minor one, but the drift is not confirmed: the apex is
+* 26 had no single neighbour holding the missing area. It is spread over several analytes.
+* 24 were a major congener beside a minor one, but the drift is not confirmed: the apex is
   not on the territory edge, or the climb does not end on the neighbour's apex within
   `max_reach`.
-* 15 are the other half of an envelope the analyst splits, as 115 beside 110 (section 2.8).
-* 10 involve congeners the profiles cannot rank: a neighbour of comparable abundance, or a
+* 15 were the other half of an envelope the analyst splits, as 115 beside 110 (section 2.8).
+* 10 involved congeners the profiles cannot rank: a neighbour of comparable abundance, or a
   congener that is not major.
+
+Version 1.3 resolved 22 of them, in five runs, 15 of them 129+138+163. The 53 that remain are
+all among those 75.
 
 The dominant congener carries `absent` and appears in the QA/QC table. A neighbour that took
 its area carries no flag. The general remedy remains a per-file retention-time correction
@@ -905,7 +1014,7 @@ that injection excluded, octa recoveries agree to 0.023, in line with the other 
 
 ### 7.5 Mass agreement trails area agreement
 
-85.5% of masses fall within ±25% against 89.8% of areas. A mass is a response factor times
+86.5% of masses fall within ±25% against 90.5% of areas. A mass is a response factor times
 an area times an internal-standard ratio, so it inherits the area disagreement and adds the
 uncertainty of two further measurements. The gap is expected in kind. Its size is worth
 attention.
@@ -928,8 +1037,8 @@ the effect on reported masses is diluted but not zero.
 
 ### 7.8 Near the detection limit
 
-Below roughly 1,000 counts·s agreement degrades quickly: 12.3% median in the 100-1,000 band,
-109% below 100. Manual and automated integration are both imprecise there. The laboratory
+Below roughly 1,000 counts·s agreement degrades quickly: 11.7% median in the 100-1,000 band,
+107% below 100. Manual and automated integration are both imprecise there. The laboratory
 censors those results against the limit of quantification, so the disagreement does not reach
 a reported number.
 
@@ -951,8 +1060,8 @@ a reported number.
   congeners of section 2.7 were picked by reading this comparison, so their contribution to
   the figures above is in-sample.
 * **The thresholds of the same-file check (section 6.1) and of the per-file retention
-  correction (section 3.3) were set while examining this archive.** The correction acts on two
-  files in it.
+  correction (section 3.3) were set while examining this archive.** The correction acts on one
+  file in it.
 * **The two ground-truth corrections of section 6.1 change what the program is scored
   against, never what it reports.** Each rests on evidence the scored values do not enter: the
   workbooks' names and dates, and their own calibration masses.
@@ -961,6 +1070,10 @@ a reported number.
   check for congeners the profiles report as zero, and the correction that gives 91 the
   fraction the reference reports for 88 and 91 together, were both added after inspecting
   the rule's misfires here.
+* **The ghost-peak ratios of section 2.10 were measured on the laboratory's archive.** Built
+  from its 2019-2023 runs alone and applied to the validation-dataset runs of 2024-2026, the
+  table brought as many rows closer to the analysts, net of those it moved further, as the full
+  table did.
 
 ### 7.10 Five penta congeners in the 2025 runs
 

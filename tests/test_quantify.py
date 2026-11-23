@@ -892,8 +892,13 @@ def test_a_calibration_whose_retention_times_do_not_fit_anchors_nothing():
     assert select_calibrations({c: fit(False, "x") for c in order}, order) == (order, {})
 
 
-def _shifted_file(shifts: dict[str, float]):
-    """Synthetic file: one peak per channel, each moved by ``shifts`` from its anchor."""
+def _shifted_file(shifts: dict[str, float], with_204: bool = False,
+                  heights: dict[str, float] | None = None):
+    """Synthetic file: one peak per channel, each moved by ``shifts`` from its anchor.
+
+    ``with_204`` adds an internal standard 204, on the channel of native 52 as in the real
+    canonical table. ``heights`` overrides a peak's height (default 10,000 counts).
+    """
     from types import SimpleNamespace
 
     from quant209.core.config import Analyte
@@ -904,15 +909,22 @@ def _shifted_file(shifts: dict[str, float]):
     spec = [("13C 15", 235.0, 165.0, "surrogate_13C", 17.47), ("30D", 304.0, 234.0, "IS_d30", 16.19),
             ("13C 28", 269.0, 199.0, "surrogate_13C", 20.84), ("18", 256.0, 186.0, "native", 18.00),
             ("52", 290.0, 220.0, "native", 30.00), ("13C 118", 338.0, 268.0, "surrogate_13C", 40.30)]
-    analytes = [Analyte(l, q1, q3, "tri" if role == "native" else "", 1, role, "30D", 1.0, rt)
+    if with_204:
+        spec.append(("204", 290.0, 220.0, "IS_204", 32.00))
+    analytes = [Analyte(l, q1, q3, "tri" if role == "native" else "", 2 if l == "204" else 1, role,
+                        "30D", 1.0, rt)
                 for l, q1, q3, role, rt in spec]
     times = np.arange(10.0, 45.0, 0.005)
     rng = np.random.default_rng(3)
-    chroms = {}
+    traces: dict[tuple[float, float], np.ndarray] = {}
     for label, q1, q3, _role, rt in spec:
-        y = 300.0 + rng.normal(0.0, 30.0, times.size)
-        y += 1.0e4 * np.exp(-0.5 * ((times - (rt + shifts.get(label, 0.0))) / 0.03) ** 2)
-        chroms[(q1, q3)] = Chromatogram(q1=q1, q3=q3, times=times, intensities=y)
+        if (q1, q3) not in traces:
+            traces[(q1, q3)] = 300.0 + rng.normal(0.0, 30.0, times.size)
+        height = (heights or {}).get(label, 1.0e4)
+        traces[(q1, q3)] = traces[(q1, q3)] + height * np.exp(
+            -0.5 * ((times - (rt + shifts.get(label, 0.0))) / 0.03) ** 2)
+    chroms = {key: Chromatogram(q1=key[0], q3=key[1], times=times, intensities=y)
+              for key, y in traces.items()}
     anchors = {a.label: a.cal_rt for a in analytes}
     params = IntegrationParams()
     record = SimpleNamespace(peaks=integrate_run(chroms, analytes, anchors, params),
@@ -920,39 +932,178 @@ def _shifted_file(shifts: dict[str, float]):
     return chroms, record, analytes, anchors, params
 
 
+def _realign(file, lost=None):
+    """Run the realignment on a synthetic file; ``lost`` defaults to the standards not detected."""
+    from quant209.core.pipeline import _realign_with, landmark_labels
+
+    chroms, record, analytes, anchors, params = file
+    landmarks = landmark_labels(analytes)
+    if lost is None:
+        lost = [p.label for p in record.peaks if p.label in landmarks and not p.detected]
+    return _realign_with(chroms, record, analytes, anchors, params,
+                         {l: 1.0e4 for l in landmarks}, landmarks, lost)
+
+
 def test_a_file_whose_standards_moved_together_is_searched_where_they_went():
     """Measured case: in one archive file everything from 16 to 24 min eluted 0.2 min late. The
     internal standard 30D and three surrogates were lost, and a hundred congeners with them."""
-    from quant209.core.pipeline import REALIGNED_FLAG, _realign_with, landmark_labels
+    from quant209.core.pipeline import REALIGNED_FLAG, landmark_labels
 
     late = {"13C 15": 0.2, "30D": 0.2, "13C 28": 0.2, "18": 0.2}
-    chroms, record, analytes, anchors, params = _shifted_file(late)
+    file = _shifted_file(late)
+    chroms, record, analytes, anchors, params = file
     before = {p.label: p.detected for p in record.peaks}
     assert not any(before[l] for l in late), "the failure: everything that moved is lost"
+    assert landmark_labels(analytes) == {"13C 15", "30D", "13C 28", "13C 118"}
 
-    landmarks = landmark_labels(analytes)
-    assert landmarks == {"13C 15", "30D", "13C 28", "13C 118"}
-    lost = [l for l in landmarks if not before[l]]
-    note = _realign_with(chroms, record, analytes, anchors, params,
-                         {l: 1.0e4 for l in landmarks}, landmarks, lost)
+    note = _realign(file)
 
     assert note and "+0.20 min" in note
     after = {p.label: p for p in record.peaks}
     for label in late:
         assert after[label].detected and REALIGNED_FLAG in after[label].flags, label
         assert abs(after[label].rt_apex - (anchors[label] + 0.2)) < 0.02
-    for label in ("52", "13C 118"):
-        assert after[label].detected and REALIGNED_FLAG not in after[label].flags
+    # A standard found where it was expected, and a native that never moved, are still found
+    # where they are: the drift curve tapers from the moved standards to the unmoved one, and
+    # only the unmoved standard itself, at zero offset, is left unflagged.
+    assert after["13C 118"].detected and REALIGNED_FLAG not in after["13C 118"].flags
+    assert after["52"].detected and abs(after["52"].rt_apex - anchors["52"]) < 0.02
     assert "30D" in record.is_areas
 
 
 def test_standards_that_disagree_about_the_shift_leave_the_file_alone():
-    from quant209.core.pipeline import _realign_with, landmark_labels
+    file = _shifted_file({"13C 15": 0.2, "30D": -0.2, "13C 28": 0.2})
+    record = file[1]
+    original = list(record.peaks)
+    assert _realign(file) is None
+    assert record.peaks == original
 
-    chroms, record, analytes, anchors, params = _shifted_file({"13C 15": 0.2, "30D": -0.2, "13C 28": 0.2})
+
+def test_a_drift_that_grows_along_the_run_is_followed_by_a_curve():
+    """Measured case: in two concentrated archive runs the standards sat 0.05 min late at 23 min
+    and 0.33 min late at 67 min. Standards 0.18 min apart in offset do not agree on one shift,
+    but they lie on one gentle line, and each native is searched where that line puts it."""
+    from quant209.core.pipeline import REALIGNED_FLAG
+
+    drift = {"30D": 0.20, "13C 15": 0.22, "13C 28": 0.27, "13C 118": 0.38}
+    natives = {"18": 0.228, "52": 0.322}   # the same line, read at their retention times
+    file = _shifted_file({**drift, **natives})
+    chroms, record, analytes, anchors, params = file
+    assert not any(p.detected for p in record.peaks if p.label in {**drift, **natives}), \
+        "the failure: everything that drifted is lost"
+
+    note = _realign(file)
+
+    assert note
+    after = {p.label: p for p in record.peaks}
+    for label, offset in {**drift, **natives}.items():
+        assert after[label].detected and REALIGNED_FLAG in after[label].flags, label
+        assert abs(after[label].rt_apex - (anchors[label] + offset)) < 0.02, label
+
+
+def test_a_shift_the_natives_do_not_share_leaves_the_file_alone():
+    """Measured case: two standards sat 0.15 min from their anchors in every file of a run, an
+    offset the native congeners did not share. Searching where the standards were found left
+    the natives exactly where they had been, and the file was flagged for nothing. A shift is
+    kept only if the natives it moves the search for are found in greater number."""
+    file = _shifted_file({"13C 15": 0.22, "30D": 0.22, "13C 28": 0.22, "18": 0.08, "52": 0.08})
+    record = file[1]
+    original = list(record.peaks)
+    assert all(p.detected for p in original if p.label in ("18", "52")), "the natives are found"
+
+    assert _realign(file) is None
+    assert record.peaks == original
+
+
+def test_the_standard_search_ignores_a_peak_far_above_its_usual_height():
+    """Measured case: a standard's channel held a peak four times its usual height among dozens
+    of other maxima, and two such channels agreed on a shift by chance. A standard is spiked at
+    one amount, so a peak several times taller is something else, and the standard is left out."""
+    from quant209.core.pipeline import _lost_standard_offsets
+
+    chroms, record, analytes, anchors, params = _shifted_file(
+        {"13C 15": 0.25, "30D": 0.25, "13C 28": 0.25}, heights={"13C 15": 5.0e4, "13C 28": 1.0e3})
+    typical = {"13C 15": 1.0e4, "30D": 1.0e4, "13C 28": 1.0e4}
+
+    found = _lost_standard_offsets(chroms, analytes, anchors, params, typical,
+                                   ["13C 15", "30D", "13C 28"])
+
+    # 13C 15 is five times its usual height; 13C 28 is a tenth of it (below the 15% floor).
+    assert set(found) == {"30D"}
+    assert abs(found["30D"] - 0.25) < 0.01
+
+
+def test_a_lost_internal_standard_in_a_file_whose_standards_show_a_drift_is_searched_for():
+    """Measured case: a whole file sat 0.1 to 0.2 min late. Every labelled standard on its own
+    channel was still found, but the internal standard 204, on a crowded channel, was not, and
+    nor were the natives near it, so the file got no masses."""
+    from quant209.core.pipeline import REALIGNED_FLAG, _internal_standard_misplaced, landmark_labels
+
+    drift = {"30D": 0.12, "13C 15": 0.12, "13C 28": 0.12, "13C 118": 0.12}
+    file = _shifted_file({**drift, "18": 0.12, "52": 0.30, "204": 0.30}, with_204=True)
+    chroms, record, analytes, anchors, params = file
+    before = {p.label: p.detected for p in record.peaks}
+    assert all(before[l] for l in drift), "the standards on their own channels are found"
+    assert not before["204"] and not before["52"], "the failure: the crowded channel is lost"
+    landmarks = landmark_labels(analytes)
+    assert _internal_standard_misplaced(record, analytes, anchors, params, landmarks)
+
+    note = _realign(file, lost=[])
+
+    assert note
+    after = {p.label: p for p in record.peaks}
+    for label, offset in (("204", 0.30), ("52", 0.30)):
+        assert after[label].detected and REALIGNED_FLAG in after[label].flags, label
+        assert abs(after[label].rt_apex - (anchors[label] + offset)) < 0.02, label
+    assert "204" in record.is_areas
+
+
+def test_a_lost_internal_standard_alone_does_not_start_a_realignment():
+    """Without a drift in the standards that were found, a missing 204 says nothing about where
+    to look: it may simply not be in the injection."""
+    from quant209.core.pipeline import _internal_standard_misplaced, landmark_labels
+
+    chroms, record, analytes, anchors, params = _shifted_file({"204": 0.30}, with_204=True)
+    assert not {p.label: p.detected for p in record.peaks}["204"]
+    landmarks = landmark_labels(analytes)
+    assert not _internal_standard_misplaced(record, analytes, anchors, params, landmarks)
+
+
+def test_two_standards_with_nothing_else_to_anchor_the_curve_leave_the_file_alone():
+    """A drift curve needs three points. Two standards found, with no other standard seen
+    anywhere, would otherwise be extended as one shift over the whole chromatogram, and that
+    would be accepted here because the natives did move."""
+    # 13C 28 and 13C 118 moved beyond the search, so only 30D and 13C 15 are found.
+    file = _shifted_file({"30D": 0.2, "13C 15": 0.2, "13C 28": 1.5, "13C 118": 1.5,
+                          "18": 0.2, "52": 0.2})
+    record = file[1]
+    original = list(record.peaks)
+    assert not any(p.detected for p in original if p.label in ("30D", "13C 15", "13C 28", "13C 118"))
+
+    assert _realign(file) is None
+    assert record.peaks == original
+
+
+def test_the_note_of_a_sloped_drift_gives_the_range_of_offsets_it_followed():
+    drift = {"30D": 0.20, "13C 15": 0.22, "13C 28": 0.27, "13C 118": 0.38}
+    file = _shifted_file({**drift, "18": 0.228, "52": 0.322})
+
+    note = _realign(file)
+
+    assert note and "+0.20 to +0.38 min" in note
+    assert "analytes from " in note and "were searched where the drift" in note
+    assert "Native peaks found there: 0 before, 2 after" in note
+
+
+def test_a_file_that_cannot_be_read_again_is_left_alone(tmp_path):
+    from quant209.core.pipeline import landmark_labels, realign_shifted_file
+
+    chroms, record, analytes, anchors, params = _shifted_file(
+        {"13C 15": 0.2, "30D": 0.2, "13C 28": 0.2, "18": 0.2})
+    record.mzml = tmp_path / "missing.mzML"
     landmarks = landmark_labels(analytes)
     original = list(record.peaks)
-    lost = [p.label for p in original if p.label in landmarks and not p.detected]
-    assert _realign_with(chroms, record, analytes, anchors, params,
-                         {l: 1.0e4 for l in landmarks}, landmarks, lost) is None
+
+    assert realign_shifted_file(record, analytes, anchors, params,
+                                {l: 1.0e4 for l in landmarks}, landmarks) is None
     assert record.peaks == original

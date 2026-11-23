@@ -70,7 +70,7 @@ def test_packaged_data_files_are_declared(spec_text: str) -> None:
     tables = sorted(
         p.name for p in resources.files("quant209.config").iterdir() if p.name.endswith(".csv")
     )
-    assert tables == ["aroclor_abundance.csv", "canonical_peaks.csv"]
+    assert tables == ["aroclor_abundance.csv", "canonical_peaks.csv", "ghost_fractions.csv"]
     for table in tables:
         assert table in spec_text, f"{table} is packaged but not declared in the spec"
     assert "assets" in spec_text

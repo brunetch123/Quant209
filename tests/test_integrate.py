@@ -69,14 +69,19 @@ def anchors(cal_chroms, analytes, params):
     return build_anchors(cal_chroms, analytes, params)
 
 
-def _assert_auditable(result: PeakResult) -> None:
+#: Flags the pipeline adds after integration, on top of the integrator's own ``KNOWN_FLAGS``.
+PIPELINE_FLAGS = KNOWN_FLAGS | {"ghost", "realigned"}
+
+
+def _assert_auditable(result: PeakResult, flags: frozenset[str] = KNOWN_FLAGS) -> None:
     """Every persisted peak must be re-plottable from its own record alone.
 
     The strict ``rt_start < rt_apex < rt_end`` / ``i_start < i_apex < i_end`` ordering is
     asserted for every *resolved* peak, meaning everything the engine reports as a real peak.
     Peaks flagged ``absent`` are the documented exception: that branch bounds the peak by its
     RT territory rather than by its apex, so the apex may sit outside the integrated region
-    (see ``test_absent_peaks_are_bounded_by_their_rt_territory``).
+    (see ``test_absent_peaks_are_bounded_by_their_rt_territory``). ``flags`` is the set a peak
+    may carry: the integrator's, or for a pipeline result :data:`PIPELINE_FLAGS`.
     """
     assert result.rt_start <= result.rt_end, f"{result.label}: RT boundary ordering"
     assert 0 <= result.i_start <= result.i_end, f"{result.label}: index boundary ordering"
@@ -86,7 +91,7 @@ def _assert_auditable(result: PeakResult) -> None:
     assert np.isfinite(result.sn), f"{result.label}: S/N"
     assert np.isfinite(result.height), f"{result.label}: height"
     assert result.method in KNOWN_METHODS, f"{result.label}: unknown method {result.method!r}"
-    assert set(result.flags) <= KNOWN_FLAGS, f"{result.label}: unknown flags {result.flags!r}"
+    assert set(result.flags) <= flags, f"{result.label}: unknown flags {result.flags!r}"
     assert result.detected == ("absent" not in result.flags), f"{result.label}: detected"
     if result.detected:
         assert result.rt_start < result.rt_apex < result.rt_end, f"{result.label}: RT ordering"
@@ -745,7 +750,7 @@ def test_the_pipeline_keeps_the_integrators_presence_verdict(reference_run: Path
     rejected = {p.label for p in records[sample.name].peaks if not p.detected}
     assert rejected & in_cal, "a sample peak the integrator rejected must stay absent"
     for peak in records[sample.name].peaks:
-        _assert_auditable(peak)
+        _assert_auditable(peak, PIPELINE_FLAGS)
 
 
 def test_two_comparable_congeners_merged_by_drift_are_split_by_a_two_peak_fit():

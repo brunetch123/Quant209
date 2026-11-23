@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     add("\n## 4. By integration flag\n")
     rows = [summarise(nat_a[nat_a["flags"].str.contains(f, na=False)], f)
             for f in ("absent", "low_sn", "narrow", "clustered", "shoulder", "forced", "displaced",
-                      "apportioned", "realigned")]
+                      "apportioned", "ghost", "realigned")]
     rows.append(summarise(nat_a[nat_a["flags"] == "-"], "(unflagged)"))
     add(table(rows, [("what", "flag")] + HEAD[1:]))
     add("\n### By boundary rule\n")

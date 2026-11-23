@@ -23,6 +23,8 @@ datas = [
     (str(project / "quant209" / "config" / "canonical_peaks.csv"), "quant209/config"),
     # The Aroclor abundance table behind the displaced-peak rule, read the same way.
     (str(project / "quant209" / "config" / "aroclor_abundance.csv"), "quant209/config"),
+    # The per-congener ghost-peak ratios behind core.ghosts, read the same way.
+    (str(project / "quant209" / "config" / "ghost_fractions.csv"), "quant209/config"),
     # Combo-box chevrons referenced from the stylesheet.
     (str(project / "quant209" / "app" / "assets"), "quant209/app/assets"),
 ]

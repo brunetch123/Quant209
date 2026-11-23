@@ -109,6 +109,7 @@ from .calibrate import (
 )
 from .config import Analyte, load_canonical_peaks
 from .deconvolve import fit_unresolved_pair
+from .ghosts import SCALE_MIN_R, Ghost, GhostScale, integrate_with_ghosts, is_fraction, run_scale
 from .integrate import integrate_run, unresolved_pairs
 from .mzml import get_transition, read_srm_mzml
 from .peaks import IntegrationParams, PeakResult, local_maxima, smooth
@@ -216,6 +217,10 @@ class FileRecord:
     #: when the conversion carries no timestamp. It is what orders the run for reference
     #: bracketing, so its absence is reported rather than guessed around.
     acquired: datetime | None = None
+    #: Every ghost peak found in this file and kept out of its integration
+    #: (:mod:`core.ghosts`): whose copy it is, where, how large, and whether it was fenced off
+    #: or subtracted. Empty when the correction is off.
+    ghosts: list[Ghost] = field(default_factory=list)
 
     @property
     def sample_id(self) -> str:
@@ -333,6 +338,9 @@ class RunResult:
     #: such a pair shares one envelope it is split by a two-peak fit, in every file. Empty when
     #: the calibration resolves every pair.
     unresolved_pairs: tuple[tuple[str, str], ...] = ()
+    #: The internal standard 204's ghost-peak fraction this run's correction was scaled by
+    #: (:class:`core.ghosts.GhostScale`). ``None`` when ``params.ghost_correction`` is off.
+    ghost_scale: GhostScale | None = None
 
     @property
     def skipped_analytes(self) -> dict[str, list[str]]:
@@ -626,13 +634,15 @@ def _bool_frame(
 def _integrate_one(
     record: FileRecord, analytes: list[Analyte], anchors: dict[str, float], params: IntegrationParams,
     unresolved: frozenset[tuple[str, str]] = frozenset(),
+    ghost_scale: GhostScale | None = None,
 ) -> None:
     """Read, integrate and release one file's chromatograms, filling ``record`` in place.
 
     Chromatograms are dropped before returning: a run is ~30 files on a host with ~2 GB, and
     the peaks are all that is needed afterwards. ``integrate_run``'s warning about unplaced
     analytes is suppressed and recomputed as data on the record: the same fact, kept
-    somewhere a report can read it.
+    somewhere a report can read it. With a ``ghost_scale`` the file's ghost peaks are kept out
+    of its integration (:func:`core.ghosts.integrate_with_ghosts`) and recorded on it.
     """
     if not record.mzml.exists():
         record.skipped_analytes = [a.label for a in analytes]
@@ -647,7 +657,9 @@ def _integrate_one(
             return
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            record.peaks = integrate_run(chroms, analytes, anchors, params, unresolved=unresolved)
+            record.peaks, record.ghosts = integrate_with_ghosts(
+                chroms, analytes, anchors, params, unresolved, ghost_scale
+            )
         record.is_window_max = _standard_window_max(chroms, analytes, anchors, params)
     finally:
         del chroms
@@ -758,12 +770,17 @@ def _missing_standard_note(name: str, missing: dict[str, str], is_labels: Sequen
 
 #: How far either side of its expected time a lost labelled standard is looked for (minutes).
 LANDMARK_SEARCH = 0.4
-#: The peak found there must reach this share of the standard's typical height in the run.
+#: The peak found there must reach this share of the standard's typical height in the run ...
 LANDMARK_FRACTION = 0.15
-#: The standards found must agree on the shift to within this (minutes).
+#: ... and stay below this multiple of it. A standard is spiked at one amount, so a peak several
+#: times its usual height on that channel is something else eluting there.
+LANDMARK_CEILING = 3.0
+#: The offsets of the standards found must lie on one straight line, none further from it than
+#: this (minutes) ...
 LANDMARK_AGREEMENT = 0.1
-#: The shift is applied this far beyond the first and last standard that moved (minutes).
-LANDMARK_MARGIN = 1.0
+#: ... and the line may rise or fall no faster than this (minutes of offset per minute of
+#: retention time). Real drift is far gentler.
+LANDMARK_SLOPE = 0.05
 #: Peak flag for an analyte searched at a retention time moved by :func:`realign_shifted_file`.
 REALIGNED_FLAG = "realigned"
 
@@ -791,46 +808,37 @@ def typical_heights(
     return out
 
 
-def realign_shifted_file(
-    record: "FileRecord", analytes: list[Analyte], anchors: dict[str, float],
-    params: IntegrationParams, typical: Mapping[str, float], landmarks: set[str],
-    unresolved: frozenset[tuple[str, str]] = frozenset(),
-) -> str | None:
-    """Re-integrate a file whose labelled standards moved together, where they went.
+def _internal_standard_misplaced(
+    record: "FileRecord", analytes: Sequence[Analyte], anchors: Mapping[str, float],
+    params: IntegrationParams, landmarks: set[str],
+) -> bool:
+    """Whether an internal standard is lost in a file whose other standards show a drift.
 
-    Each file is integrated at the retention times of its nearest calibration injection. If
-    part of one file's chromatogram elutes late, the analytes there are searched in the wrong
-    place and reported absent, internal standard included. Measured case: in one archive file
-    everything from 16 to 24 min eluted 0.2 min late; its internal standard 30D and three
-    surrogates were lost, and with them the masses of a hundred congeners.
-
-    The labelled standards are spiked into every file, so they show where this file's
-    chromatography went. The correction acts only when at least two of them (on channels with
-    no native congener, :func:`landmark_labels`) were lost here, are found within
-    :data:`LANDMARK_SEARCH` at :data:`LANDMARK_FRACTION` of their usual height, and agree on
-    the shift. Analytes from the first to the last moved standard, plus
-    :data:`LANDMARK_MARGIN`, are then searched that much later. The new integration is kept
-    only if it recovers those standards, loses no standard that was found before, and finds no
-    fewer native peaks in that span. Otherwise the file is left exactly as it was. Every moved
-    peak carries the ``realigned`` flag. Returns the run note, or ``None``.
+    Standards found where they were expected still say where the chromatography went. Three of
+    them with a median offset beyond half the apex search window, in a file whose internal
+    standard was not detected, is a file searched in the wrong place even though fewer than two
+    standards were lost outright.
     """
     by_label = {p.label: p for p in record.peaks}
-    lost = [label for label in landmarks
-            if label in anchors and label in by_label and not by_label[label].detected
-            and np.isfinite(typical.get(label, np.nan))]
-    if len(lost) < 2 or not record.mzml.exists():
-        return None
-    chroms = read_srm_mzml(record.mzml)
-    try:
-        return _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost,
-                             unresolved)
-    finally:
-        del chroms
+    lost_internal = [a.label for a in analytes
+                     if a.role in IS_ROLES and a.label in anchors and a.label in by_label
+                     and not by_label[a.label].detected]
+    offsets = [float(by_label[label].rt_apex) - anchors[label] for label in landmarks
+               if label in anchors and label in by_label and by_label[label].detected]
+    return bool(lost_internal) and len(offsets) >= 3 and (
+        abs(float(np.median(offsets))) > params.rt_window / 2)
 
 
-def _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost,
-                  unresolved=frozenset()):
-    by_label = {p.label: p for p in record.peaks}
+def _lost_standard_offsets(
+    chroms, analytes: Sequence[Analyte], anchors: Mapping[str, float], params: IntegrationParams,
+    typical: Mapping[str, float], lost: Sequence[str],
+) -> dict[str, float]:
+    """Where each lost labelled standard went, as its offset from its anchor (minutes).
+
+    The standard is the tallest peak within :data:`LANDMARK_SEARCH` of its anchor, if that peak
+    reaches :data:`LANDMARK_FRACTION` of the standard's typical height and stays under
+    :data:`LANDMARK_CEILING` times it. A standard with no such peak is left out.
+    """
     analyte_by = {a.label: a for a in analytes}
     found: dict[str, float] = {}
     for label in lost:
@@ -844,44 +852,180 @@ def _realign_with(chroms, record, analytes, anchors, params, typical, landmarks,
         if not maxima:
             continue
         top = max(maxima, key=lambda i: trace[i])
-        if trace[top] >= LANDMARK_FRACTION * typical[label]:
+        if LANDMARK_FRACTION * typical[label] <= trace[top] <= LANDMARK_CEILING * typical[label]:
             found[label] = float(chrom.times[top]) - anchors[label]
-    if len(found) < 2:
+    return found
+
+
+def realign_shifted_file(
+    record: "FileRecord", analytes: list[Analyte], anchors: dict[str, float],
+    params: IntegrationParams, typical: Mapping[str, float], landmarks: set[str],
+    unresolved: frozenset[tuple[str, str]] = frozenset(),
+    ghost_scale: GhostScale | None = None,
+) -> str | None:
+    """Re-integrate a file whose chromatography drifted from its calibration's, where it went.
+
+    Each file is integrated at the retention times of its nearest calibration injection. If
+    part of one file's chromatogram elutes late, the analytes there are searched in the wrong
+    place: reported absent, or credited with a neighbour's peak, internal standard included.
+    Measured cases: in one archive file everything from 16 to 24 min eluted 0.2 min late; its
+    internal standard 30D and three surrogates were lost, and with them the masses of a hundred
+    congeners. In two concentrated archive runs the drift was a slope rather than a step, the
+    standards sitting 0.05 min late at 23 min and 0.33 min late at 67 min, which one shift fits
+    only roughly.
+
+    The labelled standards are spiked into every file, so they show where this file's
+    chromatography went. The correction acts when at least two of them (on channels with no
+    native congener, :func:`landmark_labels`) were lost here, or when an internal standard was
+    lost while three standards found where expected show an offset
+    (:func:`_internal_standard_misplaced`). The lost standards must be found within
+    :data:`LANDMARK_SEARCH` at :data:`LANDMARK_FRACTION` to :data:`LANDMARK_CEILING` times their
+    usual height, and lie on one gentle line (:data:`LANDMARK_AGREEMENT`,
+    :data:`LANDMARK_SLOPE`). The file's drift curve then runs through every standard it shows,
+    those found where they went and those found where expected, and each analyte whose offset
+    on that curve exceeds half the apex search window is searched where the curve puts it.
+
+    The new integration is kept only if it recovers the standards that were lost, loses none
+    that was found before, and finds *more* native peaks where it moved the search than before.
+    A shift the native congeners do not share leaves their count where it was, so a file with no
+    native peak to corroborate it is left as it was. Otherwise the file is left exactly as
+    integrated. Every moved peak carries the ``realigned`` flag. Returns the run note, or
+    ``None``. The re-integration keeps ghost peaks out exactly as the first did
+    (``ghost_scale``, see :func:`_integrate_one`).
+    """
+    by_label = {p.label: p for p in record.peaks}
+    lost = [label for label in landmarks
+            if label in anchors and label in by_label and not by_label[label].detected
+            and np.isfinite(typical.get(label, np.nan))]
+    if not record.mzml.exists():
         return None
-    shift = float(np.median(list(found.values())))
-    if abs(shift) <= params.rt_window / 2 or any(
-        abs(offset - shift) > LANDMARK_AGREEMENT for offset in found.values()
-    ):
+    if len(lost) < 2 and not _internal_standard_misplaced(record, analytes, anchors, params,
+                                                           landmarks):
         return None
-    first = min(anchors[label] for label in found)
-    last = max(anchors[label] for label in found)
-    lo, hi = first - LANDMARK_MARGIN, last + LANDMARK_MARGIN
-    moved = {label: rt + shift if lo <= rt <= hi else rt for label, rt in anchors.items()}
+    chroms = read_srm_mzml(record.mzml)
+    try:
+        return _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost,
+                             unresolved, ghost_scale)
+    finally:
+        del chroms
+
+
+def _realign_with(chroms, record, analytes, anchors, params, typical, landmarks, lost,
+                  unresolved=frozenset(), ghost_scale=None):
+    by_label = {p.label: p for p in record.peaks}
+    internal = [a.label for a in analytes if a.role in IS_ROLES and a.label in by_label]
+    found = _lost_standard_offsets(chroms, analytes, anchors, params, typical, lost)
+    kept = {label: float(by_label[label].rt_apex) - anchors[label] for label in landmarks
+            if label in anchors and label in by_label and by_label[label].detected}
+    points = {**kept, **found}
+    if len(points) < 3 or (len(lost) >= 2 and len(found) < 2):
+        return None
+
+    # The standards that must agree: the lost ones found, or, when fewer than two were lost
+    # and an internal standard was, every standard that shows an offset.
+    steady = found if len(found) >= 2 else points
+    if abs(float(np.median(list(steady.values())))) <= params.rt_window / 2:
+        return None
+    at = np.array([anchors[label] for label in steady])
+    off = np.array(list(steady.values()))
+    slope, level = np.polyfit(at, off, 1) if np.ptp(at) > 0 else (0.0, float(off.mean()))
+    if abs(slope) > LANDMARK_SLOPE or float(np.max(np.abs(off - (level + slope * at)))) > (
+            LANDMARK_AGREEMENT):
+        return None
+
+    # The drift curve runs through every standard the file shows. An analyte is searched
+    # where it puts it, once that is more than half the apex search window from the anchor.
+    by_anchor = {anchors[label]: offset for label, offset in points.items()}
+    xs = np.array(sorted(by_anchor))
+    ys = np.array([by_anchor[x] for x in xs])
+    drift = {label: float(np.interp(rt, xs, ys)) for label, rt in anchors.items()}
+    moved_labels = {label for label, d in drift.items() if abs(d) >= params.rt_window / 2}
+    if not moved_labels:
+        return None
+    moved = {label: rt + drift[label] if label in moved_labels else rt
+             for label, rt in anchors.items()}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        peaks = integrate_run(chroms, analytes, moved, params, unresolved=unresolved)
+        peaks, ghosts = integrate_with_ghosts(chroms, analytes, moved, params, unresolved,
+                                              ghost_scale)
     after = {p.label: p for p in peaks}
+
+    standards = {label for label in landmarks if label in by_label} | set(internal)
     if not all(label in after and after[label].detected for label in found):
         return None
     if any(by_label[label].detected and not (label in after and after[label].detected)
-           for label in landmarks if label in by_label):
+           for label in standards):
         return None
-    span = [a.label for a in analytes
-            if a.role == "native" and a.label in anchors and lo <= anchors[a.label] <= hi]
+    if len(lost) < 2 and not any(
+            not by_label[label].detected and label in after and after[label].detected
+            for label in internal):
+        return None
+    span = [a.label for a in analytes if a.role == "native" and a.label in moved_labels]
     before_n = sum(1 for label in span if label in by_label and by_label[label].detected)
     after_n = sum(1 for label in span if label in after and after[label].detected)
-    if after_n < before_n:
+    if after_n <= before_n:
         return None
     for peak in peaks:
-        if peak.label in anchors and lo <= anchors[peak.label] <= hi:
+        if peak.label in moved_labels:
             peak.flags.append(REALIGNED_FLAG)
     record.peaks = peaks
+    record.ghosts = ghosts
     record.is_areas = internal_standard_areas(peaks, analytes)
     record.is_window_max = _standard_window_max(chroms, analytes, moved, params)
-    return (f"{record.entry.name}: labelled standards {', '.join(sorted(found))} eluted "
-            f"{shift:+.2f} min from where the calibration puts them, so every analyte from "
-            f"{lo:.2f} to {hi:.2f} min was searched {shift:+.2f} min away. "
+
+    lo, hi = min(found.values(), default=0.0), max(found.values(), default=0.0)
+    where = sorted(anchors[label] for label in moved_labels)
+    biggest = max((drift[label] for label in moved_labels), key=abs)
+    standards_note = (f"labelled standards {', '.join(sorted(found))} eluted "
+                      + (f"{lo:+.2f} min" if hi - lo < 0.005 else f"{lo:+.2f} to {hi:+.2f} min")
+                      + " from where the calibration puts them" if found else
+                      "the labelled standards that were found show an offset from where the "
+                      "calibration puts them")
+    return (f"{record.entry.name}: {standards_note}, so the {len(moved_labels)} analytes from "
+            f"{where[0]:.2f} to {where[-1]:.2f} min were searched where the drift through the "
+            f"file's {len(points)} standards puts them, by up to {biggest:+.2f} min. "
             f"Native peaks found there: {before_n} before, {after_n} after")
+
+
+#: How many blanks (or reference injections) the run's ghost-peak scale is the median of.
+GHOST_SCALE_FILES = 4
+
+
+def _measure_ghost_scale(
+    quantified: Sequence[FileEntry], converted_dir: Path, analytes: list[Analyte],
+    anchors_for_name: Callable[[str], dict[str, float]], params: IntegrationParams,
+) -> GhostScale:
+    """The run's internal-standard 204 ghost fraction (:func:`core.ghosts.run_scale`).
+
+    Read in the run's blanks, where 204 stands nearly alone, each at the anchors of the
+    calibration it is integrated against, until :data:`GHOST_SCALE_FILES` of them have measured
+    both steps: the fraction is the instrument's, steady across a run, so more blanks only cost
+    reads. The reference injections are read only for a step the blanks do not measure. Each
+    file is read and released in turn, as in the integration loop.
+    """
+    measured: dict[str, list[dict[int, float]]] = {"blank": [], "ref": []}
+    for kind in ("blank", "ref"):
+        if kind == "ref" and all(any(step in f for f in measured["blank"]) for step in (1, 2)):
+            break
+        for entry in quantified:
+            if entry.file_type != kind:
+                continue
+            if sum(1 for f in measured[kind] if 1 in f and 2 in f) >= GHOST_SCALE_FILES:
+                break
+            path = _mzml_path(entry, converted_dir)
+            if not path.exists():
+                continue
+            chroms = read_srm_mzml(path)
+            try:
+                if not any(c.times.size > 1 for c in chroms.values()):
+                    continue
+                fractions = is_fraction(chroms, analytes, anchors_for_name(entry.name), params,
+                                        min_r=SCALE_MIN_R)
+            finally:
+                del chroms
+            if fractions:
+                measured[kind].append(fractions)
+    return run_scale(measured["blank"], measured["ref"])
 
 
 def select_calibrations(
@@ -1116,15 +1260,28 @@ def run_analysis(
     for name in excluded_cals:
         calibration_for[name] = name
 
+    def anchors_for_name(name: str) -> dict[str, float]:
+        paired = calibration_for.get(name, "")
+        return anchors_by_cal.get(paired) or own_anchors.get(paired) or anchors
+
+    # Ghost peaks (see :mod:`core.ghosts`). Every congener's in-source fragments leave a copy of
+    # its peak on lower homologs' channels, at a size the instrument sets. The scale is the
+    # internal standard 204's copy, read where 204 stands nearly alone, in the run's blanks, and
+    # it has to be known before the first file is integrated: one extra read per blank.
+    ghost_scale: GhostScale | None = None
+    if params.ghost_correction:
+        ghost_scale = _measure_ghost_scale(quantified, converted_dir, analytes, anchors_for_name,
+                                           params)
+        notes.append(ghost_scale.note())
+
     anchors_for_file: dict[str, dict[str, float]] = {}
     for i, entry in enumerate(quantified):
         report("integrate", i, len(quantified), entry.sample_id)
         file_id = _unique_id(entry, set(records))
         record = FileRecord(entry=entry, mzml=_mzml_path(entry, converted_dir))
-        paired = calibration_for.get(entry.name, "")
-        file_anchors = anchors_by_cal.get(paired) or own_anchors.get(paired) or anchors
+        file_anchors = anchors_for_name(entry.name)
         anchors_for_file[file_id] = file_anchors
-        _integrate_one(record, analytes, file_anchors, params, unresolved)
+        _integrate_one(record, analytes, file_anchors, params, unresolved, ghost_scale)
         if not record.usable:
             notes.append(
                 f"{entry.name}: decoded to no chromatograms (truncated or missing "
@@ -1137,15 +1294,16 @@ def run_analysis(
     sample_ids, blank_ids = ids_by_type["sample"], ids_by_type["blank"]
     file_ids = list(records)
 
-    # A reported file whose labelled standards moved together is searched where they went
-    # (see :func:`realign_shifted_file`). Every other file is left exactly as integrated.
+    # A reported file whose labelled standards show its chromatography drifted is searched where
+    # the drift puts each analyte (see :func:`realign_shifted_file`). Every other file is left
+    # exactly as integrated.
     landmarks = landmark_labels(analytes)
     typical = typical_heights(records, sample_ids + blank_ids, landmarks)
     for fid in sample_ids + blank_ids:
         if records[fid].usable:
             note = realign_shifted_file(
                 records[fid], analytes, anchors_for_file[fid], params, typical, landmarks,
-                unresolved,
+                unresolved, ghost_scale,
             )
             if note:
                 notes.append(note)
@@ -1327,4 +1485,5 @@ def run_analysis(
         calibration_for=calibration_for,
         unresolved_pairs=tuple(sorted(unresolved)),
         excluded_calibrations=excluded_cals,
+        ghost_scale=ghost_scale,
     )
