@@ -36,7 +36,7 @@ from typing import Any
 
 from PySide6.QtCore import QThreadPool, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel
 
 from quant209.app import theme
 from quant209.app.state import STEP_EXPORT

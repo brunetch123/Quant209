@@ -217,17 +217,68 @@ def test_resolved_neighbours_split_at_their_shared_valley():
     )
     bounds = [(0, 149), (150, n - 1)]
     apexes = [100, 200]
+    times = idx / 100.0  # 0.01 min per sample, so a 0.5 min reach is 50 samples
 
-    left = _resolve_boundaries(detect, bounds, apexes, [True, True], 0, halfwidth=50)
-    right = _resolve_boundaries(detect, bounds, apexes, [True, True], 1, halfwidth=50)
+    left = _resolve_boundaries(detect, bounds, apexes, [True, True], 0, times, 0.5)
+    right = _resolve_boundaries(detect, bounds, apexes, [True, True], 1, times, 0.5)
     assert left[2] == "valley_drop" and right[2] == "valley_drop"
     # The split is the shared valley: neither peak reaches past it into the other.
     assert 100 < left[1] < 200 and 100 < right[0] < 200
     assert left[1] <= right[0]
 
     # With the neighbour absent, the same peak is bounded by its own baseline edge instead.
-    isolated = _resolve_boundaries(detect, bounds, apexes, [True, False], 0, halfwidth=50)
+    isolated = _resolve_boundaries(detect, bounds, apexes, [True, False], 0, times, 0.5)
     assert isolated[2] == "rt_window"
+
+
+def _segmented_peak(fast_first: bool, tau: float) -> tuple[np.ndarray, np.ndarray]:
+    """One tailing peak at 55 min on a trace whose MRM time segments sample at 0.549 s and 0.305 s.
+
+    ``fast_first`` False: 0.549 s to 47 min, 0.305 s after (the hexa channel's layout, the peak in
+    the faster segment, the trace's median interval the slower one). True: a short 0.549 s segment
+    around the peak inside a trace sampled at 0.305 s elsewhere (the median the faster one).
+    """
+    if fast_first:
+        t = np.concatenate([np.arange(23.0, 54.0, 0.305 / 60), np.arange(54.0, 56.5, 0.549 / 60),
+                            np.arange(56.5, 80.0, 0.305 / 60)])
+    else:
+        t = np.concatenate([np.arange(23.0, 47.0, 0.549 / 60), np.arange(47.0, 58.5, 0.305 / 60)])
+    x = t - 55.0
+    front = np.exp(-0.5 * (x / 0.035) ** 2)
+    back = 0.6 * np.exp(-np.clip(x, 0.0, None) / tau) + 0.4 * front
+    return t, 1e5 * np.where(x <= 0, front, back) + 20.0
+
+
+def _one_peak(t: np.ndarray, y: np.ndarray) -> PeakResult:
+    a = Analyte(label="169", q1=359.8, q3=289.9, homolog="hexa", order=1, role="native", is_norm="204",
+                cal_mass=58.2, cal_rt=55.0)
+    (p,) = integrate_transition(t, y, [a], {"169": 55.0}, IntegrationParams())
+    return p
+
+
+def test_an_isolated_peak_reaches_max_halfwidth_minutes_where_the_trace_is_sampled_faster():
+    """The reach of an unbounded side is ``max_halfwidth`` in minutes, also in a faster segment.
+
+    Counted in samples of the trace's median interval it was 27 x 0.305 s = 0.137 min there: on the
+    hexa channel PCB 169's calibration peak and 156+157 in samples were cut on their own tails
+    (169's calibration area a median 0.67 of the analysts' on the newer oven program).
+    """
+    t, y = _segmented_peak(fast_first=False, tau=0.05)
+    p = _one_peak(t, y)
+    assert p.rt_end - p.rt_apex >= 0.24, f"window ends {p.rt_end - p.rt_apex:.3f} min after the apex"
+    m = (t > 54.5) & (t < 55.8)
+    whole = float(np.trapezoid(y[m] - 20.0, t[m] * 60.0))
+    assert p.area >= 0.95 * whole, f"area {p.area:,.0f} vs the whole peak {whole:,.0f}"
+
+
+def test_an_isolated_peak_reaches_no_further_than_max_halfwidth_minutes_where_sampled_slower():
+    """And no further: counted in samples of a faster median interval it was 49 x 0.549 s = 0.45 min."""
+    t, y = _segmented_peak(fast_first=True, tau=0.5)
+    p = _one_peak(t, y)
+    step = float(np.max(np.diff(t)))
+    assert p.rt_end - p.rt_apex <= 0.25 + step, f"window ends {p.rt_end - p.rt_apex:.3f} min after the apex"
+    assert p.rt_apex - p.rt_start <= 0.25 + step, (
+        f"window starts {p.rt_apex - p.rt_start:.3f} min before the apex")
 
 
 def test_valley_drop_is_produced_on_real_data(cal_chroms, analytes, anchors, params):

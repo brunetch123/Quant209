@@ -118,8 +118,6 @@ CHART_SERIES: tuple[str, ...] = (
 # ``MainWindow.first_painted`` and check for a reflow flash.
 FONT_SIZE_PT = 10.5  # body
 FONT_SIZE_SMALL_PT = 9  # chips, footnotes, table headers
-FONT_SIZE_TITLE_PT = 16  # page titles
-FONT_SIZE_WORDMARK_PT = 15
 
 #: The 8-px grid. Every margin/padding/gap in the app is a multiple of this.
 SPACING = 8

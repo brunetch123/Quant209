@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.4.1 (2026-11-23)
+
+### Integration
+
+- **A peak's window reaches 0.25 min in every part of a trace.** A side of a peak with no
+  resolved neighbour may reach `max_halfwidth`, 0.25 min, from the apex. The reach was counted in
+  samples of the trace's median sampling interval, and a transition's MRM time segments do not
+  all sample it at that rate: where the hexa channel is sampled every 0.305 s instead of 0.549 s,
+  the count reached 0.137 min. 156+157, PCB 169, 128+166 and PCB 126 were cut on their own tails
+  there, and the straight baseline from the floor to the cut took a triangle out from under them.
+  169, the hexa channel's last congener, was cut in every calibration injection, so its response
+  factor ran high, and 156+157 in samples whenever 169 is absent. The reach is now measured on the
+  trace's own retention times. See [`docs/METHODS.md`](docs/METHODS.md) section 2.3.
+- **Effect.** On the benchmark, rows within ±25% of the analyst rise from 91.5% to 91.8% for peak
+  areas and from 87.3% to 87.7% for masses. 169's response factor lies within ±25% of the
+  analyst's in 67.2% of runs (27.6% before), 126's in 98.3% (96.6%), and no run's area agreement
+  falls by a percentage point or more. On the validation dataset, 300 area rows move inside ±25%
+  of the analyst and 160 outside (masses 258 in, 55 out). 156+157 in samples of runs under the
+  shorter oven program goes from 54.6% to 92.7% within ±25%, and 169's response factor lies
+  within ±25% in 30 instead of 12 of 55 such runs and in 69 instead of 50 of 71 others. Some
+  low-level peaks whose windows now reach further take in what the analysts leave out, mostly
+  167, 170, 162, 172 and 190.
+
+### Retention-time alignment
+
+- **A copy of another congener is never taken for a calibration peak.** In a calibration
+  standard every congener leaves a copy of its peak on the channels one and two chlorines down,
+  among the analytes' own peaks, and an analyte predicted in the wrong place could be anchored on
+  one. On runs under a shorter oven program, PCB 169 was anchored on PCB 170's copy and PCB 189
+  on PCB 208's, and every file of those runs was integrated there. A calibration peak within
+  0.012 min of a peak on a parent homolog's channel, and no larger than twice the copy that
+  homolog can leave, is no longer offered to the elution-order search. See
+  [`docs/METHODS.md`](docs/METHODS.md) section 3.1.
+- **A channel whose anchors disagree with the other channels is searched again.** On the same
+  runs, the straight line fitted per channel placed the last congeners of the hexa to nona
+  channels up to 1.7 min early, and the search gave each of them the peak before its own. Each
+  anchor is now compared with the drift the run's other channels show at its retention time, and
+  a channel with anchors more than 0.15 min off it is searched again, predicted from that drift.
+  A channel whose anchors all agree is left exactly as it was. This also places 87+125, 117,
+  85+116 and 110 on their own peaks in the 2025 runs of METHODS section 7.10.
+- **Effect.** Against the retention times on the analysts' calibration sheets, anchors more
+  than 0.05 min off fall from 4.49% to 1.60% on runs under the shorter oven program and from
+  0.05% to 0.01% on the others. On the benchmark, rows within ±25% of the analyst rise from
+  90.5% to 91.5% for peak areas and from 86.5% to 87.3% for masses, and the total mass
+  disagreement falls by 9.5%. 189's response factor lies within ±25% of the analyst's in 95.7%
+  of runs (48.9% before), 195's in 98.3% (65.5%). On the validation dataset, areas within ±25%
+  rise from 87.5% to 88.3% and masses from 86.7% to 87.5%, and response factors not issued fall
+  from 88 to 6. No run's area agreement falls by a percentage point or more. Agreement that
+  rested on a misplaced anchor goes: 156+157's window no longer runs on to 169's, and 115, which
+  shares 110's envelope, is reported absent in more files.
+
+### Documentation
+
+- [`docs/METHODS.md`](docs/METHODS.md) sections 2.6 and 2.8 said a rider is fitted with every
+  resolved peak within 0.75 min of it and that the climb to a displaced peak's top stays within
+  0.20 min of the anchor. Both are counted in samples at the trace's median sampling interval, so
+  they span those distances only where a trace is sampled at its median rate. The sections now
+  say so, and section 2.3 gives the measurement behind keeping them: measured in minutes, they
+  moved no headline figure and gave 182's peak to 187 in 12 benchmark files.
+- The README, METHODS sections 6 and 7 and
+  [`docs/validation/README.md`](docs/validation/README.md) report this version's validation
+  figures: peak areas 1.86% median |RPD| and 91.8% within ±25%, congener masses 3.94% and 87.7%,
+  surrogate recoveries 0.021 mean absolute error, and no run worse than 3.6% at the median.
+  METHODS section 7.9's response-factor agreement had kept version 1.0's figure and is brought up
+  to date.
+
 ## 1.4.0 (2026-11-22)
 
 ### Integration

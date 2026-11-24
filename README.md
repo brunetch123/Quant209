@@ -138,11 +138,11 @@ fifteen that are not scored.
 
 | | median relative difference | within ±25% |
 |---|---|---|
-| Peak areas | 1.9% | 90.5% |
-| Congener masses | 4.0% | 86.5% |
+| Peak areas | 1.9% | 91.8% |
+| Congener masses | 3.9% | 87.7% |
 | Surrogate recoveries | 0.021 mean absolute error | |
 
-No run in the archive disagrees by more than 7.4% at the median. Agreement is best on large,
+No run in the archive disagrees by more than 3.6% at the median. Agreement is best on large,
 well-resolved peaks, with a median of 0.5% above 10⁶ counts·s. It degrades near the detection
 limit, where manual integration is also imprecise and results are censored.
 

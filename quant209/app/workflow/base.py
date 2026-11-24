@@ -63,9 +63,6 @@ from PySide6.QtWidgets import (
 from quant209.app import theme
 from quant209.app.state import STEP_TITLES, AppState
 
-#: Chip tones, matching the ``[tone=...]`` selectors in :mod:`quant209.app.theme`.
-TONES = ("neutral", "accent", "success", "warning", "error", "info")
-
 # --------------------------------------------------------------------------------------
 # The file-role vocabulary, shared by every page that names one
 # --------------------------------------------------------------------------------------

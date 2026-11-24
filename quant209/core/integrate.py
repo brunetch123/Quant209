@@ -130,11 +130,36 @@ class _Forced:
 
 
 def _halfwidth_points(times: np.ndarray, max_halfwidth: float) -> int:
-    """Convert a max half-width in minutes to a sample count for this trace."""
+    """Convert a max half-width in minutes to a sample count for this trace.
+
+    One count for the whole trace, from its median sampling interval: what a rider's envelope
+    (``_fit_rider``) and the displaced-peak drift cap use. A peak's own boundaries measure the
+    minutes on the trace's times instead (``_reach_limits``), because an MRM time segment can
+    sample a transition faster or slower than the rest of its trace.
+    """
     if times.size < 2:
         return 5
     dt = float(np.median(np.diff(times)))
     return max(2, int(round(max_halfwidth / dt))) if dt > 0 else 5
+
+
+def _reach_limits(times: np.ndarray, apex: int, max_halfwidth: float) -> tuple[int, int]:
+    """The furthest indices an unbounded side may reach: ``max_halfwidth`` minutes either side of ``apex``.
+
+    Measured on this trace's own times, never as one sample count for the whole trace. A
+    transition's MRM time segments can sample it at different rates: the hexa channel is sampled
+    every 0.549 s up to 47-51 min and every 0.305 s after, so a count taken from its median
+    interval (27 samples) reached only 0.137 min where 156+157 and PCB 169 elute, and those peaks
+    were cut on their own tails. Measured on the 142-run dataset before the change: 169's
+    calibration area a median 0.67 of the analysts' on the newer oven program and 0.78 on the
+    older one, 156+157 in newer-program samples 0.80. Where a segment is sampled more slowly than
+    the median the count reached too far instead (0.32 min on the hepta channel's early segment).
+    At least one sample either side, so a boundary search is never empty.
+    """
+    t0 = float(times[apex])
+    lo = int(np.searchsorted(times, t0 - max_halfwidth, side="left"))
+    hi = int(np.searchsorted(times, t0 + max_halfwidth, side="right")) - 1
+    return max(0, min(lo, apex - 1)), min(times.size - 1, max(hi, apex + 1))
 
 
 def _resolve_boundaries(
@@ -143,7 +168,8 @@ def _resolve_boundaries(
     apexes: list[int],
     present: list[bool],
     i: int,
-    halfwidth: int,
+    times: np.ndarray,
+    max_halfwidth: float,
 ) -> tuple[int, int, str]:
     """Choose analyte ``i``'s integration boundaries and the method string describing them.
 
@@ -160,9 +186,9 @@ def _resolve_boundaries(
     * A neighbour is itself a resolved peak. The boundary on that side is the valley the two
       share, a perpendicular drop that gives each peak the area on its own side.
     * The neighbour is absent or there is none. This peak extends *through* that neighbour's
-      territory to its own baseline edge, capped at one half-width from the apex.
+      territory to its own baseline edge, capped at ``max_halfwidth`` minutes from the apex
+      (``_reach_limits``, on the trace's own ``times``).
     """
-    n = detect.size
     apex = apexes[i]
 
     if not present[i]:
@@ -172,13 +198,12 @@ def _resolve_boundaries(
 
     left_resolved = i > 0 and present[i - 1]
     right_resolved = i < len(apexes) - 1 and present[i + 1]
+    reach_lo, reach_hi = _reach_limits(times, apex, max_halfwidth)
 
-    left_limit = valley_index(detect, apexes[i - 1], apex) if left_resolved else max(0, apex - halfwidth)
+    left_limit = valley_index(detect, apexes[i - 1], apex) if left_resolved else reach_lo
     i_start = _local_min(detect, left_limit, apex, left_limit)
 
-    right_limit = (
-        valley_index(detect, apex, apexes[i + 1]) if right_resolved else min(n - 1, apex + halfwidth)
-    )
+    right_limit = valley_index(detect, apex, apexes[i + 1]) if right_resolved else reach_hi
     i_end = _local_min(detect, apex, right_limit, right_limit)
 
     # One resolved neighbour is enough for this peak to have been split at a shared valley.
@@ -455,7 +480,8 @@ def _force(
         elif analyte.label in params.forced_present:
             as_if = list(present)
             as_if[i] = True
-            start, end, method = _resolve_boundaries(detect, bounds, apexes, as_if, i, halfwidth)
+            start, end, method = _resolve_boundaries(detect, bounds, apexes, as_if, i, times,
+                                                     params.max_halfwidth)
             # Where the search ended on a slope, its territory cut the climb short: the top
             # of the peak lies further on. The boundaries above are the rule's, and the apex
             # recorded is the top actually reached inside them, so the height and S/N
@@ -556,7 +582,8 @@ def integrate_transition(
                 if present[i] or not present[j] or {i, j} & (taken | unresolved_members):
                     continue
                 # The envelope is the present one's peak, bounded as it would be without the rule.
-                j_start, j_end, _ = _resolve_boundaries(detect, bounds, apexes, present, j, halfwidth)
+                j_start, j_end, _ = _resolve_boundaries(detect, bounds, apexes, present, j, times,
+                                                        params.max_halfwidth)
                 pair = fit_pair(times, integ, expected[i], expected[j], params.max_reach,
                                 window=(j_start, j_end))
                 if pair is None:
@@ -645,7 +672,7 @@ def integrate_transition(
         if i in shoulders
         else (forced[i].start, forced[i].end, forced[i].method)
         if i in forced
-        else _resolve_boundaries(detect, bounds, apexes, present, i, halfwidth)
+        else _resolve_boundaries(detect, bounds, apexes, present, i, times, params.max_halfwidth)
         for i in range(len(ordered))
     ]
     #    A neighbour that lost a reclaimed peak is absent, and an absent analyte is bounded

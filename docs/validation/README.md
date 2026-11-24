@@ -29,15 +29,15 @@ mass ≥ 1 ng).
 
 | | rows | median &#124;RPD&#124; | within ±25% | total ratio |
 |---|---|---|---|---|
-| Peak areas | 41,376 | **1.94%** | **90.5%** | 1.006 |
-| Congener masses | 30,712 | **4.03%** | **86.5%** | 1.019 |
+| Peak areas | 41,376 | **1.86%** | **91.8%** | 1.006 |
+| Congener masses | 30,712 | **3.94%** | **87.7%** | 1.005 |
 | Surrogate recoveries | 6,711 | 0.021 mean absolute error | | |
 
 Areas and masses both meet the acceptance criteria (median ≤ 10%, ≥ 80% within ±25%). A
 mass multiplies three measured quantities, so it inherits the area disagreement and adds to
 it, and its coverage clears the gate by less.
 
-**No run disagrees by more than 7.4% at the median.** The best is 0.68%. **No sample's
+**No run disagrees by more than 3.6% at the median.** The best is 0.61%. **No sample's
 total native PCB mass differs from the analyst's by 2× or more**, apart from two trace-level
 samples where the difference is a few nanograms.
 
@@ -55,12 +55,12 @@ like for like.
 
 ## Changes since 1.0.0
 
-| | 1.0.0 | 1.1.0 | 1.2.0 | 1.3.0 | 1.4.0 |
-|---|---|---|---|---|---|
-| Peak areas: median &#124;RPD&#124;, within ±25% | 2.13%, 87.1% | 2.12%, 87.4% | 2.04%, 88.8% | 1.99%, 89.8% | 1.94%, 90.5% |
-| Congener masses: median &#124;RPD&#124;, within ±25% | 4.61%, 78.7% | 4.60%, 79.0% | 4.24%, 84.1% | 4.14%, 85.5% | 4.03%, 86.5% |
-| Total absolute mass error, detectable rows | 3,214k ng | 3,004k ng | 1,565k ng | 1,474k ng | 1,434k ng |
-| Detectable rows reported at 1% or less of the analyst's value | 1,673 | 1,340 | 1,174 | 922 | 935 |
+| | 1.0.0 | 1.1.0 | 1.2.0 | 1.3.0 | 1.4.0 | 1.4.1 |
+|---|---|---|---|---|---|---|
+| Peak areas: median &#124;RPD&#124;, within ±25% | 2.13%, 87.1% | 2.12%, 87.4% | 2.04%, 88.8% | 1.99%, 89.8% | 1.94%, 90.5% | 1.86%, 91.8% |
+| Congener masses: median &#124;RPD&#124;, within ±25% | 4.61%, 78.7% | 4.60%, 79.0% | 4.24%, 84.1% | 4.14%, 85.5% | 4.03%, 86.5% | 3.94%, 87.7% |
+| Total absolute mass error, detectable rows | 3,214k ng | 3,004k ng | 1,565k ng | 1,474k ng | 1,434k ng | 1,295k ng |
+| Detectable rows reported at 1% or less of the analyst's value | 1,673 | 1,340 | 1,174 | 922 | 935 | 868 |
 
 1.1.0's changes come from the named rules for congeners 83, 117, 90+101+113 and 118
 ([`../METHODS.md`](../METHODS.md) section 2.7), whose peaks carry the `forced` flag. 1.2.0
@@ -78,8 +78,10 @@ two neighbouring congeners share where a run's calibration does not separate the
 standard's composition (section 3.1). 1.4.0 keeps ghost peaks, the copy of a congener's peak
 that losing HCl or Cl2 in the ion source leaves on a lower homolog's channel, out of
 integrations, flagged `ghost` (section 2.10), and follows a file's drift along a curve
-(section 3.3). Together with the ground-truth corrections above, the total absolute mass error
-is 52% below 1.1.0's. The area median barely moves, because these act on few rows. The named
+(section 3.3). 1.4.1 keeps calibration anchors off ghost copies and in line with the drift the
+run's other transitions show (section 3.1), and lets a peak's window reach 0.25 min in every
+part of a trace (section 2.3). Together with the ground-truth corrections above, the total
+absolute mass error is 57% below 1.1.0's. The area median barely moves, because these act on few rows. The named
 rules, and two details of the displaced-peak rule, were chosen by reading this same
 comparison, so that share of the improvement is in-sample.
 
@@ -87,12 +89,12 @@ comparison, so that share of the improvement is in-sample.
 
 | manual area (counts·s) | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| > 10⁶ | 2,394 | 0.5% | 93.9% |
-| 10⁵ – 10⁶ | 6,321 | 0.9% | 95.1% |
-| 10⁴ – 10⁵ | 13,076 | 1.6% | 92.8% |
-| 10³ – 10⁴ | 19,585 | 3.1% | 87.0% |
-| 10² – 10³ | 25,903 | 11.7% | 68.2% |
-| < 10² | 52,084 | 107% | 18.1% |
+| > 10⁶ | 2,394 | 0.5% | 95.4% |
+| 10⁵ – 10⁶ | 6,321 | 0.9% | 96.7% |
+| 10⁴ – 10⁵ | 13,076 | 1.5% | 94.3% |
+| 10³ – 10⁴ | 19,585 | 3.0% | 88.1% |
+| 10² – 10³ | 25,903 | 11.4% | 69.2% |
+| < 10² | 52,084 | 107% | 17.9% |
 
 The bottom two bands are below the reporting threshold. In that range, manual integration is
 imprecise too, and results are censored against the limit of quantification. They are shown
@@ -104,12 +106,12 @@ for completeness, not as a claim.
 |---|---|---|---|
 | mono | 757 | 1.05% | 99.3% |
 | di | 3,575 | 1.60% | 98.5% |
-| tri | 5,740 | 1.95% | 97.1% |
-| tetra | 7,730 | 2.18% | 89.6% |
-| penta | 9,067 | 2.63% | 82.6% |
-| hexa | 8,962 | 1.62% | 90.9% |
-| hepta | 4,411 | 1.60% | 93.5% |
-| octa | 975 | 3.34% | 76.4% |
+| tri | 5,740 | 1.96% | 97.3% |
+| tetra | 7,730 | 2.20% | 89.6% |
+| penta | 9,067 | 2.41% | 85.1% |
+| hexa | 8,962 | 1.51% | 91.8% |
+| hepta | 4,411 | 1.35% | 95.6% |
+| octa | 975 | 2.61% | 92.4% |
 | nona | 147 | 5.03% | 89.8% |
 | deca | 12 | 9.17% | 91.7% |
 
@@ -118,13 +120,13 @@ crowded window in the method. Crowding is where automated and manual integration
 
 ## Where the disagreement is
 
-935 detectable rows (2.3% of comparisons) are reported at 1% or less of the analyst's
+868 detectable rows (2.1% of comparisons) are reported at 1% or less of the analyst's
 value. They are two different failures.
 
-- **Riders on a larger neighbour's leading edge.** The 882 rows below 10⁶ counts·s are many
+- **Riders on a larger neighbour's leading edge.** The 822 rows below 10⁶ counts·s are many
   but small: together they carry 0.2% of the analyst's detectable area. Four congeners (115,
-  88, 98 and 143) supply 379 of them. The separation there is genuinely ambiguous.
-- **Dominant peaks in concentrated samples.** The 53 rows above 10⁶ counts·s carry 3.3% of
+  88, 98 and 143) supply 428 of them. The separation there is genuinely ambiguous.
+- **Dominant peaks in concentrated samples.** The 46 rows above 10⁶ counts·s carry 3.6% of
   the analyst's detectable area, down from 8.7% before the displaced-peak rule. The peak's
   top moves off its retention-time anchor and the area goes to the wrong congener, while each
   file's total area still agrees with the analyst's. The rule gives back the clear cases.

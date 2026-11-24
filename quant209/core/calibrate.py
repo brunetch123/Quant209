@@ -1224,6 +1224,99 @@ def detect_cal_peaks(chrom: Chromatogram, params: IntegrationParams) -> list[int
     return [i for i, prom in zip(maxima, proms) if prom >= floor]
 
 
+#: A calibration peak whose apex lies this close (minutes) to the apex of a peak on the channel
+#: of the homolog one or two chlorines higher can be that congener's in-source copy (a ghost
+#: peak, see :mod:`core.ghosts`): the copy's apex falls within one acquisition cycle of its
+#: parent's (0.30 to 0.43 s on the archive's methods, 0.005 to 0.007 min), and this allows two.
+COPY_RT_TOL = 0.012
+#: ... and it is taken for the copy when its prominence is no more than this many times the copy
+#: the parent is expected to leave (the largest ratio of that homolog and step in
+#: ``ghost_fractions.csv``, times PCB 204's default fraction). A congener's own calibration peak
+#: is several times larger than any copy, since the standard holds every congener at comparable
+#: amounts. Measured on a run under the shorter oven programme: PCB 170's copy on the hexa channel
+#: had a prominence of 928 against PCB 169's own 44,331, and PCB 208's on the hepta channel 11,500
+#: against PCB 189's 84,200.
+COPY_SIZE = 2.0
+#: An anchor this far (minutes) from the drift interpolated from the other transitions' anchors
+#: sends its transition back for a second assignment (see :func:`_drift_second_look`). On runs
+#: under the shorter oven programme the misplaced anchors sat 0.3 to 1.7 min from that drift;
+#: the agreeing ones sit within a few hundredths of a minute.
+DRIFT_OUTLIER = 0.15
+
+
+def copy_peaks(
+    cal_chroms: dict[tuple[float, float], Chromatogram],
+    analytes: list[Analyte],
+    params: IntegrationParams,
+) -> dict[tuple[float, float], set[int]]:
+    """Detected calibration peaks that are copies of a more chlorinated congener's peak.
+
+    A PCB losing HCl or Cl2 in the ion source leaves a copy of its peak on the channel one or two
+    homologs down, at its own retention time. In a calibration standard every congener is present,
+    so these copies sit among the analytes' own peaks, and an analyte whose predicted retention
+    time is off can be matched to a copy instead of its own peak: on runs acquired under a shorter
+    oven programme, PCB 169 was matched to the copy of PCB 170 and PCB 189 to that of PCB 208.
+
+    Returns, per native transition, the indices (as :func:`detect_cal_peaks` reports them) of the
+    peaks that coincide with a peak on a parent homolog's channel and are no larger than a copy.
+    """
+    from .config import load_ghost_fractions
+    from .ghosts import DEFAULT_IS_FRACTION, HOMOLOGS, STEPS
+
+    by_transition = analytes_by_transition(analytes)
+    homolog_of: dict[tuple[float, float], str] = {}
+    for transition, members in by_transition.items():
+        natives = [a.homolog for a in members if a.role in ("native", "IS_204") and a.homolog]
+        if natives:
+            homolog_of[transition] = max(set(natives), key=natives.count)
+    transition_of = {h: t for t, h in homolog_of.items()}
+    ratios = load_ghost_fractions()
+    largest: dict[tuple[str, int], float] = {}
+    for a in analytes:
+        if a.role == "native" and a.homolog:
+            for step, r in ratios.get(a.label, {}).items():
+                largest[(a.homolog, step)] = max(largest.get((a.homolog, step), 0.0), r)
+        elif a.role == "IS_204":
+            # The ratios are relative to PCB 204's own copies, so 204 counts as 1.
+            for step in (1, 2):
+                largest[(a.homolog, step)] = max(largest.get((a.homolog, step), 0.0), 1.0)
+
+    peaks: dict[tuple[float, float], tuple[list[int], np.ndarray, np.ndarray]] = {}
+    for transition in homolog_of:
+        chrom = get_transition(cal_chroms, *transition)
+        if chrom is None or chrom.times.size == 0:
+            continue
+        idx = detect_cal_peaks(chrom, params)
+        if not idx:
+            continue
+        detect = smooth(chrom.intensities, params.smooth_window, params.smooth_poly)
+        peaks[transition] = (idx, chrom.times[idx], np.asarray(peak_prominences(detect, idx)))
+
+    out: dict[tuple[float, float], set[int]] = {}
+    for transition, homolog in homolog_of.items():
+        if transition not in peaks:
+            continue
+        idx, times, proms = peaks[transition]
+        rank = HOMOLOGS.index(homolog)
+        for step in (1, 2):
+            if rank + step >= len(HOMOLOGS):
+                continue
+            parent = HOMOLOGS[rank + step]
+            parent_tr = transition_of.get(parent)
+            if parent_tr not in peaks or step not in STEPS.get(parent, ()):
+                continue
+            ratio = largest.get((parent, step))
+            if not ratio:
+                continue
+            limit = COPY_SIZE * ratio * DEFAULT_IS_FRACTION[step]
+            _pidx, ptimes, pproms = peaks[parent_tr]
+            for i, t, prom in zip(idx, times, proms):
+                near = np.abs(ptimes - t) <= COPY_RT_TOL
+                if near.any() and prom <= limit * float(pproms[near].max()):
+                    out.setdefault(transition, set()).add(int(i))
+    return out
+
+
 def build_anchors(
     cal_chroms: dict[tuple[float, float], Chromatogram],
     analytes: list[Analyte],
@@ -1253,6 +1346,13 @@ def build_anchors(
     came out as the identity produces byte-identical anchors to passing ``None``, by
     construction.
 
+    Two guards keep the assignment on the analytes' own peaks. The copies that more
+    chlorinated congeners leave on a channel are never offered to it (:func:`copy_peaks`), and
+    a transition whose anchors disagree with the drift the other transitions show is assigned a
+    second time from that drift (:func:`_drift_second_look`). On runs under a shorter oven
+    programme, a transition's straight line placed its last analytes up to 1.7 min early, and
+    PCB 169 and PCB 189 were anchored on the copies of PCB 170 and PCB 208 that sat there.
+
     Returns a plain ``label -> RT`` mapping. The calibration file's ``PeakResult`` records
     that RRF derivation needs come from integrating the cal file with these anchors,
     not from this function.
@@ -1261,7 +1361,11 @@ def build_anchors(
     expected_rt = (
         (lambda a: float(a.cal_rt)) if alignment is None else alignment.expected_rt
     )
+    # Copies of more chlorinated congeners are never offered to the elution-order assignment
+    # (see copy_peaks): a copy is not an analyte's calibration peak.
+    copies = copy_peaks(cal_chroms, analytes, params)
     anchors: dict[str, float] = {}
+    state: dict = {}
     for transition, transition_analytes in analytes_by_transition(analytes).items():
         anchored = [a for a in transition_analytes if not np.isnan(a.cal_rt)]
         # Sorted on the *aligned* retention times, since those are what the search and the
@@ -1284,7 +1388,8 @@ def build_anchors(
         # changed, not just its offset. See ``assign_in_elution_order``. Analytes the
         # assignment cannot place keep their aligned prediction and are refined below,
         # exactly as before, so this stage can add information but never remove it.
-        detected_idx = detect_cal_peaks(chrom, params)
+        excluded = copies.get(transition, set())
+        detected_idx = [i for i in detect_cal_peaks(chrom, params) if i not in excluded]
         assigned: list[int | None] = [None] * len(anchored)
         if (
             len(anchored) >= ORDER_MIN_ANALYTES
@@ -1303,7 +1408,80 @@ def build_anchors(
         _detect, _bounds, apexes = refine_apexes(chrom.times, chrom.intensities, searched, params)
         for analyte, apex in zip(anchored, apexes):
             anchors[analyte.label] = float(chrom.times[apex])
+        state[transition] = (anchored, chrom, detected_idx, assigned)
+
+    # Stage 3: a second assignment for any transition whose anchors disagree with the drift the
+    # other transitions show (see _drift_second_look).
+    if state:
+        anchors = _drift_second_look(anchors, state, params)
     return anchors
+
+
+def _drift_curve(points: list[tuple[float, float]]):
+    """Piecewise-linear shift (observed minus canonical) against canonical retention time."""
+    if len(points) < 2:
+        return None
+    cs = np.array([p[0] for p in points], dtype=float)
+    ss = np.array([p[1] for p in points], dtype=float)
+    order = np.argsort(cs)
+    cs, ss = cs[order], ss[order]
+    uc, inv = np.unique(cs, return_inverse=True)
+    us = np.bincount(inv, weights=ss) / np.bincount(inv)
+    return lambda c: float(np.interp(c, uc, us))
+
+
+def _drift_second_look(
+    anchors: dict[str, float],
+    state: dict,
+    params: IntegrationParams,
+) -> dict[str, float]:
+    """Second look at a transition whose anchors disagree with the drift of the other transitions.
+
+    A straight line per transition places the last analytes of a long transition too early on a
+    run whose oven programme compresses the end of the chromatogram differently, and the
+    elution-order assignment then hands each of them an earlier peak. The run's other transitions
+    still show where the chromatography went at that retention time. Each anchor is compared with
+    the drift interpolated from the anchors of every other transition. In a transition with
+    disagreeing anchors, those analytes (and any left unassigned) are predicted from the drift of
+    all agreeing anchors, the others keep their own anchors as their prediction, and the
+    transition is assigned again. A transition whose anchors all agree is left exactly as it was,
+    and a run whose transitions all agree comes out unchanged.
+
+    ``state`` holds, per transition, ``(analytes, chromatogram, detected peak indices, first
+    assignment)`` as :func:`build_anchors` left them.
+    """
+    points: dict = {}
+    for tr, (anchored, _chrom, _idx, assigned) in state.items():
+        lst = [(float(a.cal_rt), anchors[a.label] - float(a.cal_rt), a.label)
+               for a, j in zip(anchored, assigned) if j is not None and a.role == "native"]
+        if lst:
+            points[tr] = lst
+    outliers: dict = {}
+    for tr, lst in points.items():
+        f = _drift_curve([(c, s) for t2, l2 in points.items() if t2 != tr for (c, s, _l) in l2])
+        if f is None:
+            continue
+        for c, s, lab in lst:
+            if abs(s - f(c)) > DRIFT_OUTLIER:
+                outliers.setdefault(tr, set()).add(lab)
+    if not outliers:
+        return anchors
+    curve = _drift_curve([(c, s) for tr, lst in points.items() for (c, s, lab) in lst
+                          if lab not in outliers.get(tr, set())])
+    if curve is None:
+        return anchors
+    out = dict(anchors)
+    for tr, labels in outliers.items():
+        anchored, chrom, detected_idx, assigned = state[tr]
+        pred = [float(a.cal_rt) + curve(float(a.cal_rt)) if (a.label in labels or j is None) else anchors[a.label]
+                for a, j in zip(anchored, assigned)]
+        detected_rt = [float(chrom.times[i]) for i in detected_idx]
+        again = assign_in_elution_order(pred, detected_rt)
+        searched = [float(chrom.times[detected_idx[j]]) if j is not None else pred[i] for i, j in enumerate(again)]
+        _detect, _bounds, apexes = refine_apexes(chrom.times, chrom.intensities, searched, params)
+        for a, apex in zip(anchored, apexes):
+            out[a.label] = float(chrom.times[apex])
+    return out
 
 
 

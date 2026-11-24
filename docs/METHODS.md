@@ -108,6 +108,48 @@ an apex of its own. The last two are for a rider, an analyte on a larger neighbo
   envelope it shares with its neighbours. The persisted boundaries say where it was looked
   for. The area is the fitted component's, not the trace between them.
 
+**How far an unbounded side reaches.** `max_halfwidth` is measured on the trace's own retention
+times, either side of the apex. A transition's MRM time segments do not all sample it at the
+same rate: the hexa channel, for one, is sampled every 0.549 s until about 47 to 51 min and every
+0.305 s after. A single sample count for the whole trace, taken from its median interval as up
+to version 1.4.0, therefore reached only 0.137 min (27 samples) on the late hexa and penta
+channels and 0.178 min on the late hepta channel, and 0.32 min on the hepta channel's early
+segment. The short reach cut peaks on their own tails, and the straight baseline from the floor
+up to the cut took a triangle out from under them: PCB 169, the hexa channel's last congener, in
+every calibration injection (a median 67% of the analysts' calibration area on runs under the
+shorter oven program of section 3.1, 78% on the others), 156+157 in samples whenever 169 is
+absent (a median 80% of the analysts' areas in samples of the shorter program), 128+166, and
+PCB 126 on the penta channel.
+
+Measured on the 49 benchmark runs of section 6, peak areas within ±25% of the analyst rise from
+91.5% to 91.8% of the 41,376 detectable native rows (143 in, 34 out) and masses from 87.3% to
+87.7% of 30,712 (139 in, 16 out). 169's response factor lies within ±25% of the analyst's in
+67.2% of runs (27.6% before) and 126's in 98.3% (96.6%), and no run loses a percentage point of
+area agreement. On the 142 runs of the validation dataset, 300 area rows move inside ±25% of the
+analyst and 160 outside, and 258 mass rows in and 55 out. 156+157 in samples of the shorter
+program goes from 54.6% to 92.7% within ±25%, and 169's response factor lies within ±25% in 30
+of 55 runs under the shorter program (12 before) and 69 of 71 others (50). What moves the other
+way is windows that now reach further and take in what the analysts leave out, mostly in
+low-level samples: 167 (110 more rows further from the analyst than closer), 170, 162, 172 and
+190. Six dataset runs lose a percentage point of area agreement, none more than 1.2. On the
+shorter program 169's calibration peak is followed within about 0.2 min by the copy of 198+199
+(section 2.10), which the analysts' areas include in some runs and not in others. A 0.25 min
+reach ends inside it, and 169's calibration area there is a median 80% of the analysts'.
+
+**Two reaches stay counted in samples.** The envelope a rider is fitted in (section 2.6: three
+times `max_halfwidth`) and the climb to a displaced peak's top (section 2.8: `max_reach`) are
+still one sample count per trace, taken at its median sampling interval. They span 0.75 and
+0.20 min where a trace is sampled at its median rate, 0.41 and 0.11 min on the late hexa and
+penta segments sampled every 0.305 s, and further than 0.75 and 0.20 min on a segment sampled
+more slowly than the median. Both were measured in minutes too, on the 49 benchmark runs.
+Detectable areas within ±25% of the analyst went from 91.79% to 91.73% (19 rows in, 44 out) and
+masses did not move (87.72%, 17 in, 16 out). The total absolute area error fell 9.4%, but nearly
+all of that was one concentrated sample whose dominant 93+100 peak 95 no longer reclaimed. In
+return the climb, now 0.20 min where the hepta trace is sampled faster than its median, gave
+182's peak to 187 in 12 files of five runs (182 reported absent, 187 at a median 36 times the
+analysts' area), and 24 of 185's rider fits gave way to a skim at a few percent of the analysts'
+area. Neither reach is right everywhere, so both stay as they were.
+
 **Co-elution: split versus summed.** Where two congeners are chromatographically resolved
 they are integrated separately by perpendicular drop, and each is reported. Where the method
 does not resolve them at all, the canonical table carries them as one summed row and one
@@ -227,7 +269,8 @@ would run up the parent's convex flank and lie above the trace almost everywhere
 area would come out as zero.
 
 **Shape fitting.** A skim approximates a rider. Fitting shapes separates it. The envelope,
-the rider and every resolved peak within 0.75 min of it (three times `max_halfwidth`), is
+the rider and every resolved peak within three times `max_halfwidth` of it (counted in samples,
+0.75 min where the trace is sampled at its median rate; section 2.3), is
 fitted as a sum of Gaussians on a flat offset, by Levenberg-Marquardt implemented in numpy.
 Three constraints carry the result, and each is a statement about the chromatography:
 
@@ -317,7 +360,8 @@ these hold:
 
 * *i* failed the presence test, its apex sits on its own territory edge, and the trace is
   still climbing across that edge into *j*'s territory;
-* climbing on from there, within `max_reach` of *i*'s anchor, ends exactly on *j*'s apex;
+* climbing on from there, within `max_reach` of *i*'s anchor (counted in samples, 0.20 min
+  where the trace is sampled at its median rate; section 2.3), ends exactly on *j*'s apex;
 * *i* is a major congener (at least 1% of one of those Aroclors), and at least
   `dominance_ratio` = 10 times more abundant than *j*.
 
@@ -560,6 +604,77 @@ the eleven-congener di and octa channels a correlation over a handful of masses 
 without these bounds it once preferred a line that re-timed the octa channel by 8.5 min and
 lost the internal standard on it.
 
+**A copy of another congener is never taken for a calibration peak.** The line says roughly
+where each congener should be. An elution-order search (`assign_in_elution_order`) then matches
+the channel's detected calibration peaks to its congeners in order, and each anchor is refined
+on the peak it was given. In the calibration standard every congener leaves copies of its peak
+on the channels one and two chlorines down (section 2.10), so the copies sit among the analytes'
+own peaks, and a congener predicted in the wrong place can be matched to one. A detected
+calibration peak is therefore withdrawn from the search (`copy_peaks`) when its apex lies within
+`COPY_RT_TOL` = 0.012 min, about two acquisition cycles, of a peak on a parent homolog's channel,
+and its prominence is at most `COPY_SIZE` = 2 times the largest copy that homolog can leave
+there: the parent peak's prominence times the homolog's largest ratio in `ghost_fractions.csv`
+times PCB 204's default fraction. A congener's own peak in the standard is many times larger
+than any copy. On one run, PCB 170's copy on the hexa channel had a prominence of 928 where PCB
+169's own peak had 44,331, and PCB 208's copy on the hepta channel 11,500 where PCB 189's had
+84,200.
+
+**A channel whose anchors disagree with the other channels is searched again.** A straight
+line per channel cannot follow an oven program that compresses the end of the chromatogram
+differently from the canonical one. On runs acquired under a shorter oven program, the line
+placed the last congeners of the hexa to nona channels up to 1.7 min early, and the search gave
+each of them the peak before its own, or a copy: PCB 169 was anchored on PCB 170's copy and
+PCB 189 on PCB 208's, and every file of those runs was integrated there. The run's other
+channels still show where the chromatography went at that retention time. After the first
+search, each native congener's offset from its retention time in the table is therefore compared
+with the offset interpolated, at that retention time, from the anchors of every other channel
+(`_drift_second_look`). A channel with anchors more than `DRIFT_OUTLIER` = 0.15 min from that
+drift is searched again: those congeners, and any the first search left unplaced, are predicted
+from the drift of all agreeing anchors, and the others keep their first anchor as their
+prediction. The misplaced anchors sat 0.3 to 1.7 min from the drift, the agreeing ones within a
+few hundredths of a minute. A channel whose anchors all agree is left exactly as it was, and a
+run whose channels all agree comes out unchanged.
+
+**What the two change.** Judged against the retention times on the analysts' calibration
+sheets (223 sheets in 105 runs), anchors more than 0.05 min from the analyst's fall from 4.49%
+to 1.60% of 17,992 comparisons on runs under the shorter oven program, and from 0.05% to 0.01%
+of 20,370 on the others. The corrected anchors are mostly late congeners: 189 (94 comparisons),
+169 (73), 195 (72), 196 (53) and 203 (51). Four anchors that were right move off. Three are in
+one run, where PCB 83 shows only as a shoulder of 99: a copy had stood in for 83 in the search,
+and without it 83 takes 99's peak and 99 takes 112's. The fourth is 83 in another run, which
+moves from 0.03 to 0.06 min from the analyst's.
+
+On the 49 benchmark runs of section 6, peak areas within ±25% of the analyst rise from 90.5% to
+91.5% of the 41,376 detectable native rows (497 in, 51 out) and masses from 86.5% to 87.3% of
+30,712 (318 in, 69 out). The total mass disagreement falls by 9.5%, and no sample total crosses
+the ±25% line. 189's response factor lies within ±25% of the analyst's in 95.7% of runs (48.9%
+before) and 195's in 98.3% (65.5%). 16 runs gain a percentage point or more of area agreement
+and none loses one. On the 142 runs of the validation dataset, areas within ±25% of the analyst
+rise from 87.5% to 88.3% of the 100,708 detectable native rows (903 in, 91 out) and masses from
+86.7% to 87.5% of 63,078 (592 in, 107 out), and the total mass disagreement falls by 8.3%. Of
+the 441 response factors that change, 81.0% lie within ±25% of the analysts' (49.0% before).
+189's lies within ±25% of the analyst's in 120 of 127 runs (72 before) and 195's in 124 (99),
+and the response factors not issued fall from 88 to 6, 41 of them 169's. 33 runs gain a
+percentage point or more of area agreement and none loses one.
+
+What moves the other way is mostly agreement that rested on a misplaced anchor. With 169
+anchored on PCB 170's copy, the copy counted as a peak, and in concentrated samples 156+157's
+window ran on to it. With 169 where it belongs and absent from the sample, 156+157's window ends
+at its own peak, short of the analyst's: 26 dataset rows move outside ±25% (16 on the
+benchmark). Section 2.3 explains why it ended there and how far it now reaches. Four dataset runs have the early di channel one peak off with or without the change.
+PCB 6's response factor agreed there only because the peak it took responds alike, and PCB 6 now
+moves further from the analysts' areas in 49 rows and closer in 16. In four concentrated samples
+of the 2025 runs of section 7.10, the misplaced anchors of 87+125, 117 and 115 had inflated their
+masses enough to make up for differences elsewhere, among them the dominant 86+97+109+119 peak,
+which the program reports absent there (section 7.2). Those four sample totals move outside ±25%
+of the analysts', to RPDs of -26% to -28%, and two other concentrated samples come inside, from
+RPDs of +36% and +39% to within 2%. 115, which shares 110's envelope, is now reported absent in
+51 more benchmark rows the analysts integrated. 12 of its 233 such rows had been within ±25%, and
+5 are now (sections 2.8 and 7.10). PCB 169 is now measured on its own peak, but its calibration
+area is a median 66% of the analyst's on the shorter program (77% on the others), so its response
+factor lies within ±25% in only 62 of 126 dataset runs. That is a question of how its peak is
+integrated, not of where it is anchored, and section 2.3 answers most of it.
+
 ### 3.2 The run-fit guard
 
 Both failures above are silent by construction. Integration always returns a number, so a run
@@ -627,7 +742,7 @@ carry the **`realigned`** flag, and the run note says which standards moved, by 
 many native peaks were found before and after.
 
 On the 49 benchmark runs it acts on 1 of 672 reported files and changes no other. That file,
-the one above, now totals 1,547 ng against the analyst's 1,486, with 90.5% of its rows within
+the one above, now totals 1,559 ng against the analyst's 1,486, with 89.3% of its rows within
 ±25% of the analyst (84.5% under the single shift it replaces). The other file the earlier rule
 moved, an injection the analyst left unquantified, is left as integrated: its two found
 standards disagreed by 0.18 min over 2.35 min, a steeper line than any drift measured. In
@@ -874,8 +989,8 @@ scored value is consulted.
 
 | | rows | median &#124;RPD&#124; | within ±25% | total ratio |
 |---|---|---|---|---|
-| Peak areas | 41,376 | **1.94%** | **90.5%** | 1.006 |
-| Congener masses | 30,712 | **4.03%** | **86.5%** | 1.019 |
+| Peak areas | 41,376 | **1.86%** | **91.8%** | 1.006 |
+| Congener masses | 30,712 | **3.94%** | **87.7%** | 1.005 |
 | Surrogate recoveries | 6,711 | 0.021 mean absolute error | | |
 
 Areas and masses both clear both gates. Mass agreement still trails area agreement, for the
@@ -888,30 +1003,33 @@ fit (section 3.2), searching a shifted file where its standards went (section 3.
 every analyst sheet against the file it came from, and putting the analyst's group masses on
 one basis (both section 6.1). Version 1.3 added splitting the pairs a run's calibration does
 not resolve (section 2.9) and settling near ties in the retention-time alignment by the
-standard's composition (section 3.1), and version 1.4 keeping ghost peaks out of integrations
-(section 2.10) and following a file's drift along a curve (section 3.3). The area median barely
-moves, because these act on few rows. What moves is the large error: total absolute mass error
-on detectable rows fell from 3,214k ng in version 1.0 to 3,004k with the named rules, to 1,565k
-in version 1.2, to 1,474k in version 1.3 and to 1,434k now. No sample's native total differs
-from the analyst's by 2× or more, except two trace-level samples where the difference is a few
-nanograms, and only 9 of 480 by more than 25%, five of them under 3 ng. The total ratios went
-from 0.975 to 1.006 for areas and from 0.991 to 1.019 for masses.
+standard's composition (section 3.1), version 1.4 keeping ghost peaks out of integrations
+(section 2.10) and following a file's drift along a curve (section 3.3), and version 1.4.1
+keeping calibration anchors off ghost copies and in line with the run's drift (section 3.1)
+and letting a peak's window reach 0.25 min in every part of a trace (section 2.3). The area
+median barely moves, because these act on few rows. What moves is the large error: total
+absolute mass error on detectable rows fell from 3,214k ng in version 1.0 to 3,004k with the
+named rules, to 1,565k in version 1.2, to 1,474k in version 1.3, to 1,434k in version 1.4 and
+to 1,295k now. No sample's native total differs from the analyst's by 2× or more, except two
+trace-level samples where the difference is a few nanograms, and only 9 of 480 by more than
+25%, five of them under 3 ng. The total ratios went from 0.975 to 1.006 for areas and from
+0.991 to 1.005 for masses.
 
-No run in the archive disagrees by more than 7.4% at the median. The best sits at 0.68%.
+No run in the archive disagrees by more than 3.6% at the median. The best sits at 0.61%.
 Agreement tracks signal:
 
 | manual area (counts·s) | rows | median &#124;RPD&#124; | within ±25% |
 |---|---|---|---|
-| > 10⁶ | 2,394 | 0.5% | 93.9% |
-| 10⁵ – 10⁶ | 6,321 | 0.9% | 95.1% |
-| 10⁴ – 10⁵ | 13,076 | 1.6% | 92.8% |
-| 10³ – 10⁴ | 19,585 | 3.1% | 87.0% |
-| 10² – 10³ | 25,903 | 11.7% | 68.2% |
-| < 10² | 52,084 | 107% | 18.1% |
+| > 10⁶ | 2,394 | 0.5% | 95.4% |
+| 10⁵ – 10⁶ | 6,321 | 0.9% | 96.7% |
+| 10⁴ – 10⁵ | 13,076 | 1.5% | 94.3% |
+| 10³ – 10⁴ | 19,585 | 3.0% | 88.1% |
+| 10² – 10³ | 25,903 | 11.4% | 69.2% |
+| < 10² | 52,084 | 107% | 17.9% |
 
 The last two bands sit below the reporting threshold and are shown for completeness. By
 homolog, area agreement runs from 1.1% (mono) to 5.0% (nona). Penta is the weakest of the
-well-populated homologs at 2.6%, and carries the most crowded transition in the method.
+well-populated homologs at 2.4%, and carries the most crowded transition in the method.
 
 Performance: cold start runs at 0.7-0.9 s median against a 3 s budget. A 29-file run processes
 in seconds, and the interface does not stall for more than 100 ms while processing.
@@ -922,29 +1040,29 @@ in seconds, and the interface does not stall for more than 100 ms while processi
 
 ### 7.1 Congeners buried on a larger peak's leading edge
 
-**935 detectable rows (2.3% of rows) are reported at 1% or less of the analyst's value.**
-They are overwhelmingly flagged `absent` (856 of them), so they are reported as flagged
+**868 detectable rows (2.1% of rows) are reported at 1% or less of the analyst's value.**
+They are overwhelmingly flagged `absent` (839 of them), so they are reported as flagged
 rather than passing silently. Version 1.0 had 1,673. The named rules of section 2.7 removed
-333 of them and later changes a further 405. The rows are two different failures. The 882
+333 of them and later changes a further 472. The rows are two different failures. The 822
 below 10⁶ counts·s are many but small: they carry 0.2% of the analyst's detectable area. The
-53 above it carry 3.3%, and are the subject of section 7.2.
+46 above it carry 3.6%, and are the subject of section 7.2.
 
-Four congeners supply 379 of the small rows: **115, 88, 98 and 143**. Each elutes on the
+Four congeners supply 428 of the small rows: **115, 88, 98 and 143**. Each elutes on the
 *leading* edge of a much larger neighbour. The trace climbs monotonically through them, so
 they produce no local maximum and no valley. The presence test rejects them, and either the
 shoulder test finds too little curvature or the shape fit of section 2.6 cannot justify its
-result. Where the fit does succeed, it works about as well as a fit can here: 3,039
-detectable rows are resolved that way, at 16.6% median |RPD| with 62% inside the band. On
+result. Where the fit does succeed, it works about as well as a fit can here: 2,952
+detectable rows are resolved that way, at 15.4% median |RPD| with 65% inside the band. On
 these four, however, the separation is genuinely ill-posed: two overlapping peaks can trade
 amplitude and reproduce the observed envelope equally well.
 
 ### 7.2 Concentrated samples: dominant peaks the rule does not reach
 
-**53 detectable rows, in 28 files from 10 runs, are dominant peaks the analyst integrates at
-more than 10⁶ counts·s and Quant 209 reports at 1% or less.** They carry 3.3% of the
+**46 detectable rows, in 27 files from 10 runs, are dominant peaks the analyst integrates at
+more than 10⁶ counts·s and Quant 209 reports at 1% or less.** They carry 3.6% of the
 analyst's detectable area, down from 8.7% before the displaced-peak rule of section 2.8, and
-they remain the largest disagreement by area. The leading congeners are 86+97+109+119 (17
-rows), a major component of the technical mixtures, and 115 (11), which shares an envelope with
+they remain the largest disagreement by area. The leading congeners are 86+97+109+119 (14
+rows), a major component of the technical mixtures, and 115 (13), which shares an envelope with
 110 (section 2.8).
 
 The mechanism was traced on the largest cases. In a concentrated sample a dominant peak
@@ -1014,7 +1132,7 @@ that injection excluded, octa recoveries agree to 0.023, in line with the other 
 
 ### 7.5 Mass agreement trails area agreement
 
-86.5% of masses fall within ±25% against 90.5% of areas. A mass is a response factor times
+87.7% of masses fall within ±25% against 91.8% of areas. A mass is a response factor times
 an area times an internal-standard ratio, so it inherits the area disagreement and adds the
 uncertainty of two further measurements. The gap is expected in kind. Its size is worth
 attention.
@@ -1037,7 +1155,7 @@ the effect on reported masses is diluted but not zero.
 
 ### 7.8 Near the detection limit
 
-Below roughly 1,000 counts·s agreement degrades quickly: 11.7% median in the 100-1,000 band,
+Below roughly 1,000 counts·s agreement degrades quickly: 11.4% median in the 100-1,000 band,
 107% below 100. Manual and automated integration are both imprecise there. The laboratory
 censors those results against the limit of quantification, so the disagreement does not reach
 a reported number.
@@ -1050,7 +1168,7 @@ a reported number.
   analyst workbooks, but their sample columns do not match the sample identifiers derived
   from the acquisition filenames, so no row joins. All fifteen are reported and skipped. The
   agreement figures cover the remaining 49.
-* **The analyst is the reference, not the truth.** Response factors agree at about 1.9%
+* **The analyst is the reference, not the truth.** Response factors agree at about 2.0%
   against a ground truth whose own cross-workbook reproducibility is about 1.1%. Movement much
   below that would be fitting one analyst's hand rather than the chromatography.
 * **Integration parameters were calibrated against two runs** and then measured against all
@@ -1075,25 +1193,24 @@ a reported number.
   table brought as many rows closer to the analysts, net of those it moved further, as the full
   table did.
 
-### 7.10 Five penta congeners in the 2025 runs
+### 7.10 Penta congeners in the 2025 runs
 
-In the 2025 calibrations, five congeners of the penta transition are identified one peak too
-early: 87+125, 117, 85+116, 110 and 115. The alignment places them correctly, but the
-elution-order search that follows (`assign_in_elution_order`) moves them. The four-congener
-group 86+97+109+119 shows there as two sub-peaks, and 115 merges into 110's tail, so the window
-has one peak too many in one place and one too few in another. The search, which values
-explaining every congener above placing each one close to its prediction, shifts the five by
-one peak each, 117 by 0.77 min. All four calibration injections shift alike, so comparing them
-does not catch it, and every sample inherits the anchors. 87+125's response factor comes out
-thirteen times too high, and the five congeners' masses in those runs are not trustworthy. They
-carry most of the remaining excess in the two runs that still read 1.14 to 1.18 times high.
+In the 2025 calibrations the four-congener group 86+97+109+119 shows as two sub-peaks, and 115
+merges into 110's tail, so the penta window has one peak too many in one place and one too few
+in another. The elution-order search (`assign_in_elution_order`), which values explaining every
+congener above placing each one close to its prediction, shifted five congeners by one peak
+each: 87+125, 117, 85+116, 110 and 115, 117 by 0.77 min. All four calibration injections shifted
+alike, so comparing them did not catch it, and 87+125's response factor came out thirteen times
+too high. Limiting how far the search may move a congener was tried and not kept, because on
+fourteen other runs the search makes correct moves of that size (190 by 0.8 min, 203 by up to
+1.2). The five anchors do disagree with the drift the run's other channels show, and the second
+look of section 3.1 now searches the channel again from that drift: 87+125, 117, 85+116 and 110
+sit on the analysts' calibration peaks in all but one calibration.
 
-A fix was built and measured. Limiting how far the search may move a congener the alignment
-identified on its own peak repairs these runs completely, but on fourteen other runs the same
-search makes correct moves of that size (190 by 0.8 min, 203 by up to 1.2), and the limit
-blocked them: area agreement fell from 88.8% to 87.6% within the band. Neither the distance
-moved nor the margin by which the search's choice wins separates the two cases, so the fix was
-not kept.
+115 remains. It has no apex of its own there, and its anchor lands on 110's, 0.05 to 0.10 min
+before the analysts' 115. Its response factor in these runs is not trustworthy, and in samples
+the displaced-peak rule (section 2.8) gives the shared envelope to 110, so 115 is reported
+absent.
 
 ---
 
